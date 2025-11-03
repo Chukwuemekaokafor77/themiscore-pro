@@ -7,6 +7,7 @@ SpeechRecognition==3.10.0
 pytest==7.4.0
 flask-sqlalchemy==3.0.5
 flask-migrate==4.0.5
+flask-login==0.6.2
 psycopg2-binary==2.9.7
 python-dateutil==2.8.2
 gunicorn==21.2.0
