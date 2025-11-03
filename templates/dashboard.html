@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - LegalIntake Pro{% endblock %}
+
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<!-- Stats Cards -->
+<div class="row">
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="card-body">
+                <h6 class="text-muted">Active Cases</h6>
+                <h3>{{ stats.active_cases }}</h3>
+                <p class="mb-0 text-success">
+                    <i class="bi bi-arrow-up"></i> 12% from last month
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="card-body">
+                <h6 class="text-muted">Active Clients</h6>
+                <h3>{{ stats.active_clients }}</h3>
+                <p class="mb-0 text-success">
+                    <i class="bi bi-arrow-up"></i> 5% from last month
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="card-body">
+                <h6 class="text-muted">Pending Actions</h6>
+                <h3>{{ stats.pending_actions }}</h3>
+                <p class="mb-0 text-danger">
+                    <i class="bi bi-exclamation-triangle"></i> 3 overdue
+                </p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <div class="card-body">
+                <h6 class="text-muted">Documents</h6>
+                <h3>{{ stats.documents_count }}</h3>
+                <p class="mb-0 text-muted">
+                    Last updated: {{ stats.last_updated }}
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activity -->
+<div class="row mt-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Recent Cases</span>
+                <a href="{{ url_for('cases') }}" class="btn btn-sm btn-outline-primary">View All</a>
+            </div>
+            <div class="list-group list-group-flush">
+                {% for case in recent_cases %}
+                <a href="#" class="list-group-item list-group-item-action">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">{{ case.title }}</h6>
+                        <small class="text-muted">{{ case.status|title }}</small>
+                    </div>
+                    <p class="mb-1">{{ case.description|truncate(60) }}</p>
+                    <small class="text-muted">Client: {{ case.client.first_name }} {{ case.client.last_name }}</small>
+                </a>
+                {% else %}
+                <div class="list-group-item">
+                    <p class="mb-0 text-muted text-center">No recent cases found.</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Upcoming Actions</span>
+                <a href="{{ url_for('actions') }}" class="btn btn-sm btn-outline-primary">View All</a>
+            </div>
+            <div class="list-group list-group-flush">
+                {% for action in upcoming_actions %}
+                <a href="#" class="list-group-item list-group-item-action">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">{{ action.title }}</h6>
+                        <span class="badge bg-{{ 'danger' if action.priority == 'high' else 'warning' if action.priority == 'medium' else 'info' }}">
+                            {{ action.priority|title }}
+                        </span>
+                    </div>
+                    <p class="mb-1">{{ action.description|truncate(50) }}</p>
+                    <small class="text-muted">Due: {{ action.due_date.strftime('%b %d, %Y') }}</small>
+                </a>
+                {% else %}
+                <div class="list-group-item">
+                    <p class="mb-0 text-muted text-center">No upcoming actions.</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

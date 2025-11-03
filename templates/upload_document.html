@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Document - LegalIntake Pro{% endblock %}
+
+{% block page_title %}Upload Document{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-body">
+        <form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_document') }}">
+            <div class="mb-3">
+                <label for="file" class="form-label">Select File</label>
+                <input class="form-control" type="file" id="file" name="file" required>
+                <div class="form-text">Maximum file size: 10MB. Allowed file types: PDF, DOC, DOCX, XLS, XLSX, JPG, PNG, GIF</div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="name" class="form-label">Document Name</label>
+                <input type="text" class="form-control" id="name" name="name" required>
+                <div class="form-text">A descriptive name for this document</div>
+            </div>
+            
+            <div class="mb-3">
+                <label for="description" class="form-label">Description (Optional)</label>
+                <textarea class="form-control" id="description" name="description" rows="3"></textarea>
+            </div>
+            
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label for="case_id" class="form-label">Related Case (Optional)</label>
+                        <select class="form-select" id="case_id" name="case_id">
+                            <option value="">Select a case (optional)</option>
+                            {% for case in cases %}
+                            <option value="{{ case.id }}">{{ case.title }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label for="document_type" class="form-label">Document Type</label>
+                        <select class="form-select" id="document_type" name="document_type">
+                            <option value="pleading">Pleading</option>
+                            <option value="motion">Motion</option>
+                            <option value="discovery">Discovery</option>
+                            <option value="correspondence">Correspondence</option>
+                            <option value="evidence" selected>Evidence</option>
+                            <option value="contract">Contract</option>
+                            <option value="agreement">Agreement</option>
+                            <option value="report">Report</option>
+                            <option value="other">Other</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="d-flex justify-content-between">
+                <a href="{{ url_for('documents') }}" class="btn btn-secondary">
+                    <i class="bi bi-arrow-left"></i> Back to Documents
+                </a>
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-upload"></i> Upload Document
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
