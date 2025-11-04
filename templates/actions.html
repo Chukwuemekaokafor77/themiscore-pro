@@ -8,14 +8,14 @@
 <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
         <span>All Actions</span>
-        <a href="#" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addActionModal">
-            <i class="bi bi-plus-lg"></i> Add Action
+        <a href="{{ url_for('add_action') }}" class="btn btn-primary">
+            <i class="bi bi-plus-lg me-1"></i> Add Action
         </a>
     </div>
-    <div class="card-body">
+    <div class="card-body p-0">
         <div class="table-responsive">
-            <table class="table table-hover">
-                <thead>
+            <table class="table table-hover mb-0">
+                <thead class="table-light">
                     <tr>
                         <th>Title</th>
                         <th>Case</th>
@@ -23,53 +23,62 @@
                         <th>Status</th>
                         <th>Priority</th>
                         <th>Assigned To</th>
-                        <th>Actions</th>
+                        <th class="text-end">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for action in actions %}
-                    <tr>
-                        <td>
-                            <a href="{{ url_for('view_action', action_id=action.id) }}" class="text-decoration-none">
-                                {{ action.title }}
-                            </a>
-                        </td>
-                        <td>
-                            {% if action.case %}
-                            <a href="{{ url_for('view_case', case_id=action.case.id) }}" class="text-decoration-none">
-                                {{ action.case.title|truncate(30) }}
-                            </a>
-                            {% else %}
-                            <span class="text-muted">No case</span>
-                            {% endif %}
-                        </td>
-                        <td>{{ action.due_date.strftime('%b %d, %Y') }}</td>
-                        <td>
-                            <span class="badge bg-{{ 'success' if action.status == 'completed' else 'warning' if action.status == 'in_progress' else 'secondary' }}">
-                                {{ action.status|replace('_', ' ')|title }}
-                            </span>
-                        </td>
-                        <td>
-                            <span class="badge bg-{{ 'danger' if action.priority == 'high' else 'warning' if action.priority == 'medium' else 'info' }}">
-                                {{ action.priority|title }}
-                            </span>
-                        </td>
-                        <td>{{ action.assigned_to.first_name }} {{ action.assigned_to.last_name }}</td>
-                        <td>
-                            <div class="btn-group">
-                                <a href="{{ url_for('view_action', action_id=action.id) }}" class="btn btn-sm btn-outline-primary">
-                                    <i class="bi bi-eye"></i>
+                        <tr>
+                            <td>
+                                <a href="{{ url_for('view_action', action_id=action.id) }}" class="text-decoration-none fw-medium">
+                                    {{ action.title }}
                                 </a>
-                                <a href="#" class="btn btn-sm btn-outline-secondary">
-                                    <i class="bi bi-pencil"></i>
-                                </a>
-                            </div>
-                        </td>
-                    </tr>
+                            </td>
+                            <td>
+                                {% if action.case_actions %}
+                                    {% for case_action in action.case_actions %}
+                                        <a href="{{ url_for('view_case', case_id=case_action.case.id) }}" class="text-decoration-none">
+                                            {{ case_action.case.title|truncate(30) }}
+                                        </a>{% if not loop.last %}, {% endif %}
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted">No case</span>
+                                {% endif %}
+                            </td>
+                            <td>{% if action.due_date %}{{ action.due_date.strftime('%b %d, %Y') }}{% else %}No due date{% endif %}</td>
+                            <td>
+                                {% set status_class = {
+                                    'completed': 'success',
+                                    'in_progress': 'warning',
+                                    'pending': 'info'
+                                }.get(action.status, 'secondary') %}
+                                <span class="badge bg-{{ status_class }}">
+                                    {{ action.status|replace('_',' ')|title }}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="badge bg-{{ 'danger' if action.priority=='high' else 'warning' if action.priority=='medium' else 'info' }}">
+                                    {{ action.priority|title }}
+                                </span>
+                            </td>
+                            <td>{{ action.assigned_to.first_name }} {{ action.assigned_to.last_name }}</td>
+                            <td class="text-end">
+                                <div class="btn-group">
+                                    <a href="{{ url_for('view_action', action_id=action.id) }}" class="btn btn-sm btn-outline-primary" title="View">
+                                        <i class="bi bi-eye"></i>
+                                    </a>
+                                    <a href="#" class="btn btn-sm btn-outline-secondary" title="Edit">
+                                        <i class="bi bi-pencil"></i>
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
                     {% else %}
-                    <tr>
-                        <td colspan="7" class="text-center">No actions found. <a href="#" data-bs-toggle="modal" data-bs-target="#addActionModal">Add your first action</a>.</td>
-                    </tr>
+                        <tr>
+                            <td colspan="7" class="text-center py-4 text-muted">
+                                No actions found. <a href="#" data-bs-toggle="modal" data-bs-target="#addActionModal">Add your first action</a>.
+                            </td>
+                        </tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -79,11 +88,11 @@
 
 <!-- Add Action Modal -->
 <div class="modal fade" id="addActionModal" tabindex="-1" aria-labelledby="addActionModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="addActionModalLabel">Add New Action</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <div class="modal-header bg-light">
+                <h5 class="modal-title" id="addActionModalLabel"><i class="bi bi-plus-circle me-2"></i> Add New Action</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST" action="{{ url_for('add_action') }}">
                 <div class="modal-body">
@@ -91,66 +100,55 @@
                         <label for="title" class="form-label">Title</label>
                         <input type="text" class="form-control" id="title" name="title" required>
                     </div>
-                    
+
                     <div class="mb-3">
                         <label for="description" class="form-label">Description</label>
                         <textarea class="form-control" id="description" name="description" rows="3"></textarea>
                     </div>
-                    
-                    <div class="row">
+
+                    <div class="row g-3">
                         <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="case_id" class="form-label">Related Case (Optional)</label>
-                                <select class="form-select" id="case_id" name="case_id">
-                                    <option value="">Select a case</option>
-                                    {% for case in Case.query.all() %}
+                            <label for="case_id" class="form-label">Related Case (Optional)</label>
+                            <select class="form-select" id="case_id" name="case_id">
+                                <option value="">Select a case</option>
+                                {% for case in Case.query.all() %}
                                     <option value="{{ case.id }}">{{ case.title }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
+                                {% endfor %}
+                            </select>
                         </div>
                         <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="assigned_to_id" class="form-label">Assign To</label>
-                                <select class="form-select" id="assigned_to_id" name="assigned_to_id" required>
-                                    {% for user in User.query.all() %}
+                            <label for="assigned_to_id" class="form-label">Assign To</label>
+                            <select class="form-select" id="assigned_to_id" name="assigned_to_id" required>
+                                {% for user in User.query.all() %}
                                     <option value="{{ user.id }}" {% if user.id == current_user.id %}selected{% endif %}>
                                         {{ user.first_name }} {{ user.last_name }} ({{ user.role|title }})
                                     </option>
-                                    {% endfor %}
-                                </select>
-                            </div>
+                                {% endfor %}
+                            </select>
                         </div>
                     </div>
-                    
-                    <div class="row">
+
+                    <div class="row g-3 mt-2">
                         <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="due_date" class="form-label">Due Date</label>
-                                <input type="date" class="form-control" id="due_date" name="due_date" required>
-                            </div>
+                            <label for="due_date" class="form-label">Due Date</label>
+                            <input type="date" class="form-control" id="due_date" name="due_date" required>
                         </div>
                         <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="priority" class="form-label">Priority</label>
-                                <select class="form-select" id="priority" name="priority" required>
-                                    <option value="low">Low</option>
-                                    <option value="medium" selected>Medium</option>
-                                    <option value="high">High</option>
-                                </select>
-                            </div>
+                            <label for="priority" class="form-label">Priority</label>
+                            <select class="form-select" id="priority" name="priority" required>
+                                {% for p in ['low','medium','high'] %}
+                                    <option value="{{ p }}" {% if p=='medium' %}selected{% endif %}>{{ p|title }}</option>
+                                {% endfor %}
+                            </select>
                         </div>
                     </div>
-                    
-                    <div class="mb-3">
+
+                    <div class="mb-3 mt-3">
                         <label for="action_type" class="form-label">Action Type</label>
                         <select class="form-select" id="action_type" name="action_type" required>
-                            <option value="meeting">Meeting</option>
-                            <option value="document_preparation">Document Preparation</option>
-                            <option value="court_filing">Court Filing</option>
-                            <option value="research">Research</option>
-                            <option value="communication">Communication</option>
-                            <option value="other">Other</option>
+                            {% for at in ['meeting','document_preparation','court_filing','research','communication','other'] %}
+                                <option value="{{ at }}">{{ at.replace('_',' ')|title }}</option>
+                            {% endfor %}
                         </select>
                     </div>
                 </div>
@@ -162,6 +160,7 @@
         </div>
     </div>
 </div>
+{% endblock %}
 
 {% block scripts %}
 {{ super() }}

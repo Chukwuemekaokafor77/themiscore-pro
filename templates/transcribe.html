@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}Voice to Text Transcription{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+
+    <!-- Breadcrumb -->
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('dashboard') }}">Dashboard</a></li>
+            <li class="breadcrumb-item active" aria-current="page">Voice to Text</li>
+        </ol>
+    </nav>
+
+    <!-- Header -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1><i class="fas fa-microphone-alt me-2"></i>Voice to Text Transcription</h1>
+        <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="autoSaveToggle" checked>
+            <label class="form-check-label" for="autoSaveToggle">Auto-save drafts</label>
+        </div>
+    </div>
+    <p class="text-muted mb-4">Record your voice or upload an audio file to transcribe it to text.</p>
+
+    <div class="row">
+
+        <!-- Left Column: Recording & Transcription -->
+        <div class="col-lg-8">
+
+            <!-- Audio Input Card -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0"><i class="fas fa-microphone me-2"></i>Audio Input</h5>
+                </div>
+                <div class="card-body">
+
+                    <!-- Recorder Controls -->
+                    <div id="recorder" class="mb-4">
+                        <div class="d-flex gap-2 mb-3">
+                            <button id="startRecord" class="btn btn-primary btn-lg">
+                                <i class="fas fa-microphone me-2"></i>Start Recording
+                            </button>
+                            <button id="stopRecord" class="btn btn-outline-danger btn-lg" disabled>
+                                <i class="fas fa-stop me-2"></i>Stop
+                            </button>
+                            <div class="vr mx-2"></div>
+                            <div id="recordingTimer" class="d-none align-items-center text-danger fw-bold">
+                                <i class="fas fa-circle me-2 recording-indicator"></i>
+                                <span id="timerDisplay">00:00</span>
+                            </div>
+                        </div>
+                        <div id="recordingStatus" class="text-muted small mb-3">
+                            Click "Start Recording" to begin. Ensure microphone access is granted.
+                        </div>
+                        <div class="progress d-none" style="height: 4px;">
+                            <div id="volumeMeter" class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <div class="text-center mb-3">- OR -</div>
+
+                    <!-- Audio Upload -->
+                    <div class="mb-4">
+                        <label for="audioUpload" class="form-label fw-bold">Upload Audio File</label>
+                        <div class="input-group">
+                            <input type="file" class="form-control" id="audioUpload" accept="audio/*">
+                            <button class="btn btn-outline-secondary" type="button" id="clearUpload">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        <div class="form-text">Supported: MP3, WAV, M4A, WEBM (max 100MB)</div>
+                        <div id="uploadInfo" class="mt-2 d-none">
+                            <div class="d-flex align-items-center">
+                                <i class="fas fa-file-audio text-primary me-2"></i>
+                                <span id="fileName" class="text-truncate"></span>
+                                <span id="fileSize" class="ms-2 text-muted small"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Transcription Button & Progress -->
+                    <div class="d-flex justify-content-between">
+                        <button id="transcribeBtn" class="btn btn-success" disabled>
+                            <i class="fas fa-play me-2"></i>Transcribe Audio
+                        </button>
+                        <div id="progress" class="align-items-center" style="display: none;">
+                            <div class="spinner-border spinner-border-sm text-primary me-2" role="status">
+                                <span class="visually-hidden">Processing...</span>
+                            </div>
+                            <span class="text-muted">Processing audio... This may take a moment.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transcription Card -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-success text-white">
+                    <h5 class="mb-0"><i class="fas fa-file-alt me-2"></i>Transcription</h5>
+                </div>
+                <div class="card-body">
+
+                    <!-- Transcribed Text -->
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <label for="transcription" class="form-label fw-bold">Transcribed Text</label>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <button type="button" class="btn btn-outline-secondary" id="copyTextBtn" title="Copy to clipboard">
+                                    <i class="far fa-copy"></i> Copy
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary" id="clearTextBtn" title="Clear text">
+                                    <i class="far fa-trash-alt"></i> Clear
+                                </button>
+                            </div>
+                        </div>
+                        <div class="position-relative">
+                            <textarea id="transcription" class="form-control" rows="10" placeholder="Your transcribed text will appear here..."></textarea>
+                            <div id="wordCount" class="position-absolute bottom-0 end-0 m-2 text-muted small">0 words</div>
+                        </div>
+                    </div>
+
+                    <!-- Confidence & Create Case -->
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span id="confidenceBadge" class="badge d-none">
+                            <i class="fas fa-info-circle me-1"></i>
+                            Confidence: <span id="confidenceValue">0</span>%
+                        </span>
+                        <button id="createCaseBtn" class="btn btn-primary" disabled>
+                            <i class="fas fa-folder-plus me-2"></i>Create Case
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Right Column: Speakers & Tips -->
+        <div class="col-lg-4">
+
+            <!-- Speakers Card -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-info text-white">
+                    <h5 class="mb-0"><i class="fas fa-users me-2"></i>Speakers</h5>
+                </div>
+                <div class="card-body">
+                    <div id="speakerContent" class="speaker-transcript text-center text-muted py-4">
+                        <i class="fas fa-users fa-3x mb-3"></i>
+                        <p class="mb-0">Speaker diarization will appear here after transcription.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tips Card -->
+            <div class="card shadow-sm">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="fas fa-info-circle me-2"></i>Tips</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="list-unstyled mb-0">
+                        <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i>Speak clearly at a moderate pace</li>
+                        <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i>Minimize background noise</li>
+                        <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i>Keep recordings under 10 minutes for best results</li>
+                        <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i>Use headphones with a microphone for better quality</li>
+                    </ul>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<!-- Hidden Audio Visualizer -->
+<canvas id="audioVisualizer" style="display: none;"></canvas>
+
+<!-- Scripts & Styles remain unchanged, can reuse your existing JS and CSS -->
+
+{% endblock %}
