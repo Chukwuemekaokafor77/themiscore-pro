@@ -440,62 +440,89 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@app.route('/documents/upload', methods=['GET', 'POST'])
+@app.route('/transcribe', methods=['GET', 'POST'])
 @login_required
-def upload_document():
+def transcribe():
     if request.method == 'POST':
         # Check if the post request has the file part
-        if 'file' not in request.files:
-            flash('No file part in the request', 'danger')
+        if 'audio_file' not in request.files:
+            flash('No file part', 'error')
             return redirect(request.url)
         
-        file = request.files['file']
+        file = request.files['audio_file']
         
         # If user does not select file, browser also
         # submit an empty part without filename
         if file.filename == '':
-            flash('No selected file', 'danger')
+            flash('No selected file', 'error')
             return redirect(request.url)
-        
-        if file and allowed_file(file.filename):
+            
+        if file:
+            # Save the file temporarily
             filename = secure_filename(file.filename)
+            temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(temp_path)
             
-            # Create a unique filename to prevent overwriting
-            base, ext = os.path.splitext(filename)
-            i = 1
-            while os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], filename)):
-                filename = f"{base}_{i}{ext}"
-                i += 1
-            
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-            
-            # Get file size in bytes
-            file_size = os.path.getsize(filepath)
-            
-            # Create document record
-            document = Document(
-                name=request.form.get('name', filename),  # Use custom name or filename
-                file_path=filepath,
-                file_type=file.content_type,
-                file_size=file_size,
-                document_type=request.form.get('document_type', 'other'),
-                description=request.form.get('description'),
-                case_id=request.form.get('case_id') or None,
-                uploaded_by=session['user_id']
-            )
-            
-            db.session.add(document)
-            db.session.commit()
-            
-            flash('Document uploaded successfully!', 'success')
-            return redirect(url_for('documents'))
-        else:
-            flash('File type not allowed. Allowed file types are: ' + ', '.join(ALLOWED_EXTENSIONS), 'danger')
+            try:
+                # Upload the file to AssemblyAI
+                def read_file(file_path, chunk_size=5242880):
+                    with open(file_path, 'rb') as _file:
+                        while True:
+                            data = _file.read(chunk_size)
+                            if not data:
+                                break
+                            yield data
+                
+                # Upload the file
+                upload_response = requests.post(
+                    ASSEMBLYAI_UPLOAD_URL,
+                    headers=ASSEMBLYAI_HEADERS,
+                    data=read_file(temp_path)
+                )
+                upload_response.raise_for_status()
+                upload_url = upload_response.json()['upload_url']
+                
+                # Start transcription with analysis
+                transcript_request = {
+                    'audio_url': upload_url,
+                    'speaker_labels': True,
+                    'sentiment_analysis': True,
+                    'entity_detection': True,
+                    'iab_categories': True,
+                    'auto_highlights': True
+                }
+                
+                transcript_response = requests.post(
+                    ASSEMBLYAI_TRANSCRIPTION_URL,
+                    json=transcript_request,
+                    headers=ASSEMBLYAI_HEADERS
+                )
+                transcript_response.raise_for_status()
+                
+                transcript_id = transcript_response.json()['id']
+                
+                # Clean up the temporary file
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                
+                return jsonify({
+                    'status': 'processing',
+                    'transcript_id': transcript_id
+                })
+                
+            except Exception as e:
+                # Clean up the temporary file in case of error
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                    
+                app.logger.error(f"Error processing audio file: {str(e)}")
+                return jsonify({'error': str(e)}), 500
     
-    # For GET request, show upload form
-    cases = db.session.query(Case).all()
-    return render_template('upload_document.html', cases=cases)
+    return render_template('transcribe.html')
 
 @app.route('/documents/<int:document_id>')
 @login_required
@@ -506,7 +533,7 @@ def view_document(document_id):
     
     # Check if file exists
     if not os.path.exists(document.file_path):
-        flash('File not found on server', 'danger')
+        flash('File not found on server', 'error')
         return redirect(url_for('documents'))
     
     # Get file extension and set appropriate MIME type
@@ -533,6 +560,63 @@ def download_document(document_id):
         as_attachment=True
     )
 
+@app.route('/documents/upload', methods=['GET', 'POST'])
+@login_required
+def upload_document():
+    if request.method == 'POST':
+        # Check if the post request has the file part
+        if 'document' not in request.files:
+            flash('No file part', 'error')
+            return redirect(request.url)
+        
+        file = request.files['document']
+        
+        # If user does not select file, browser also
+        # submit an empty part without filename
+        if file.filename == '':
+            flash('No selected file', 'error')
+            return redirect(request.url)
+            
+        if file and allowed_file(file.filename):
+            try:
+                # Create uploads directory if it doesn't exist
+                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+                
+                # Save the file
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(file_path)
+                
+                # Create document record
+                document = Document(
+                    filename=filename,
+                    file_path=file_path,
+                    mime_type=file.mimetype,
+                    file_size=os.path.getsize(file_path),
+                    uploaded_by=current_user.id,
+                    uploaded_at=datetime.utcnow()
+                )
+                
+                # If case_id is provided in the form, associate the document with the case
+                case_id = request.form.get('case_id')
+                if case_id:
+                    document.case_id = case_id
+                
+                db.session.add(document)
+                db.session.commit()
+                
+                flash('Document uploaded successfully!', 'success')
+                return redirect(request.referrer or url_for('documents'))
+                
+            except Exception as e:
+                db.session.rollback()
+                app.logger.error(f'Error uploading document: {str(e)}')
+                flash('Error uploading document', 'error')
+                return redirect(request.url)
+    
+    # If GET request, show the upload form
+    return redirect(url_for('documents'))
+
 @app.route('/documents/delete/<int:document_id>', methods=['POST'])
 @login_required
 def delete_document(document_id):
@@ -541,8 +625,8 @@ def delete_document(document_id):
         abort(404, description="Document not found")
     
     # Check if the current user is authorized to delete this document
-    if document.uploaded_by != session['user_id'] and not current_user.is_admin:
-        flash('You are not authorized to delete this document', 'danger')
+    if document.uploaded_by != current_user.id and not current_user.is_admin:
+        flash('You are not authorized to delete this document', 'error')
         return redirect(url_for('documents'))
     
     try:
@@ -558,7 +642,7 @@ def delete_document(document_id):
     except Exception as e:
         db.session.rollback()
         app.logger.error(f'Error deleting document: {str(e)}')
-        flash('Error deleting document', 'danger')
+        flash('Error deleting document', 'error')
     
     return redirect(url_for('documents'))
 
@@ -783,7 +867,7 @@ def add_client():
             return redirect(url_for('clients'))
         except Exception as e:
             db.session.rollback()
-            flash(f'Error adding client: {str(e)}', 'danger')
+            flash(f'Error adding client: {str(e)}', 'error')
     
     return render_template('add_client.html')        
 
@@ -800,223 +884,106 @@ def internal_error(error):
     return jsonify({'error': 'An internal error occurred'}), 500
 
 # Initialize AI Analyzer
-from ai_services import AICaseAnalyzer
-ai_analyzer = AICaseAnalyzer()
+from ai_services import case_analyzer
 
-# Transcription routes
-@app.route('/transcribe', methods=['GET', 'POST'])
-@login_required
-def transcribe():
-    if not ASSEMBLYAI_API_KEY:
-        return jsonify({'error': 'AssemblyAI API key is not configured'}), 500
-        
-    if request.method == 'POST':
-        if 'audio' not in request.files:
-            return jsonify({'error': 'No audio file provided'}), 400
-        
-        audio_file = request.files['audio']
-        if audio_file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
-        
-        # Validate file type
-        allowed_extensions = {'wav', 'mp3', 'm4a', 'webm'}
-        file_ext = audio_file.filename.rsplit('.', 1)[1].lower() if '.' in audio_file.filename else ''
-        if file_ext not in allowed_extensions:
-            return jsonify({'error': f'Unsupported file type. Allowed types: {allowed_extensions}'}), 400
-        
-        try:
-            # Save the file temporarily
-            filename = secure_filename(audio_file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            audio_file.save(filepath)
-            
-            # Upload to AssemblyAI
-            with open(filepath, 'rb') as f:
-                upload_response = requests.post(
-                    ASSEMBLYAI_UPLOAD_URL,
-                    headers=ASSEMBLYAI_HEADERS,
-                    data=f.read()
-                )
-        
-            if upload_response.status_code != 200:
-                return jsonify({'error': 'Failed to upload file to AssemblyAI'}), 500
-        
-            audio_url = upload_response.json().get('upload_url')
-            
-            # Start transcription with additional processing
-            transcript_response = requests.post(
-                ASSEMBLYAI_TRANSCRIPTION_URL,
-                headers=ASSEMBLYAI_HEADERS,
-                json={
-                    'audio_url': audio_url,
-                    'speaker_labels': True,
-                    'word_boost': ['legal', 'court', 'case', 'law', 'judge', 'attorney', 'client'],
-                    'filter_profanity': True,
-                    'auto_highlights': True,
-                    'iab_categories': True,
-                    'entity_detection': True,
-                    'speakers_expected': 2  # Expecting client and attorney
-                }
-            )
-        
-            if transcript_response.status_code != 200:
-                return jsonify({'error': 'Failed to start transcription'}), 500
-            
-            transcript_id = transcript_response.json().get('id')
-            
-            # Save the transcription job to the database
-            transcription = Transcription(
-                transcript_id=transcript_id,
-                status='processing',
-                original_filename=filename,
-                file_path=filepath,
-                created_by_id=current_user.id if current_user.is_authenticated else None
-            )
-            db.session.add(transcription)
-            db.session.commit()
-            
-            # Return the transcript ID for polling
-            return jsonify({
-                'transcript_id': transcript_id,
-                'status': 'processing',
-                'message': 'Transcription in progress',
-                'transcription_id': transcription.id
-            }), 202
-            
-        except Exception as e:
-            app.logger.error(f"Error in transcription: {str(e)}")
-            return jsonify({'error': str(e)}), 500
-    
-    # For GET requests, show the transcription interface
-    return render_template('transcribe.html')
-
-@app.route('/transcribe/status/<transcript_id>', methods=['GET'])
-@login_required
+@app.route('/transcribe/status/<transcript_id>')
 def transcription_status(transcript_id):
     try:
-        # Get the transcription status from AssemblyAI
-        response = requests.get(
-            f"{ASSEMBLYAI_TRANSCRIPTION_URL}/{transcript_id}",
-            headers=ASSEMBLYAI_HEADERS
+        # Get AI analysis from the transcript
+        analysis = case_analyzer.analyze_audio_transcript(transcript_id)
+        
+        if 'error' in analysis:
+            return jsonify({'error': analysis['error']}), 500
+            
+        # Get the transcription text from analysis
+        transcription = analysis.get('text', '')
+        
+        # Create a new case with the transcription and analysis
+        case = Case(
+            title=f"Transcribed Case - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+            description=transcription,
+            status='new',
+            created_at=datetime.utcnow()
         )
+        db.session.add(case)
+        db.session.flush()  # Get the case ID
         
-        if response.status_code != 200:
-            return jsonify({'error': 'Failed to get transcription status'}), 500
-            
-        data = response.json()
+        # Save AI insights
+        if 'case_analysis' in analysis:
+            insight = AIInsight(
+                case_id=case.id,
+                analysis_type='initial',
+                content=json.dumps(analysis),
+                created_at=datetime.utcnow()
+            )
+            db.session.add(insight)
         
-        # If transcription is complete, analyze it with our AI
-        if data.get('status') == 'completed':
-            transcript_text = data.get('text', '')
-            
-            # Analyze the transcript with our AI
-            analysis = ai_analyzer.analyze_text(transcript_text)
-            
-            # Add AI analysis to the response
-            data['ai_analysis'] = analysis
-            
-            # Extract key information for quick access
-            case_type = analysis.get('case_analysis', {}).get('case_type', 'other')
-            confidence = analysis.get('case_analysis', {}).get('confidence', 0)
-            
-            # Create a new case with the analysis
-            if current_user.is_authenticated:
-                case = Case(
-                    title=f"{case_type.replace('_', ' ').title()} - {datetime.utcnow().strftime('%Y-%m-%d')}",
-                    description=transcript_text,
-                    status='open',
-                    case_type=case_type,
-                    confidence=confidence,
-                    created_by_id=current_user.id,
-                    metadata={
-                        'transcript_id': transcript_id,
-                        'analysis': analysis
-                    }
-                )
-                db.session.add(case)
-                db.session.commit()
-                
-                # Create an AI insight for the case
-                insight = AIInsight(
-                    case_id=case.id,
-                    insight_type='initial_analysis',
-                    content=json.dumps(analysis, indent=2),
-                    created_by_id=current_user.id
-                )
-                db.session.add(insight)
-                db.session.commit()
-                
-                data['case_id'] = case.id
+        db.session.commit()
         
-        return jsonify(data)
-        
+        return jsonify({
+            'status': 'completed',
+            'text': transcription,
+            'ai_analysis': analysis,
+            'case_id': case.id
+        })
+            
     except Exception as e:
-        app.logger.error(f"Error in transcription status: {str(e)}")
+        app.logger.error(f"Error in transcription_status: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/analyze/text', methods=['POST'])
-@login_required
 def analyze_text():
     """Analyze text with AI and return case insights."""
     try:
         data = request.get_json()
-        text = data.get('text', '').strip()
+        text = data.get('text', '')
         
         if not text:
             return jsonify({'error': 'No text provided'}), 400
             
-        # Analyze the text with our AI
-        analysis = ai_analyzer.analyze_text(text)
+        # Get AI analysis using the case_analyzer
+        analysis = case_analyzer.analyze_text(text)
         
-        return jsonify({
-            'status': 'success',
-            'analysis': analysis
-        })
+        # If there's an error in analysis, return it
+        if 'error' in analysis:
+            return jsonify(analysis), 400
+            
+        return jsonify(analysis)
         
     except Exception as e:
-        app.logger.error(f"Error in text analysis: {str(e)}")
+        app.logger.error(f"Error in analyze_text: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/cases/<int:case_id>/analyze', methods=['POST'])
-@login_required
+@app.route('/api/analyze/case/<int:case_id>', methods=['POST'])
 def analyze_case(case_id):
     """Re-analyze a case with updated AI models."""
     try:
         case = Case.query.get_or_404(case_id)
         
-        # Make sure the user has permission to access this case
-        if case.created_by_id != current_user.id and not current_user.is_admin:
-            return jsonify({'error': 'Unauthorized'}), 403
-            
         # Get the case text to analyze
-        text = case.description or ''
+        text_to_analyze = f"{case.title}. {case.description}"
         
-        # Analyze with our AI
-        analysis = ai_analyzer.analyze_text(text)
+        # Get AI analysis using the case_analyzer
+        analysis = case_analyzer.analyze_text(text_to_analyze)
         
-        # Update the case with new analysis
-        case.case_type = analysis.get('case_analysis', {}).get('case_type', 'other')
-        case.confidence = analysis.get('case_analysis', {}).get('confidence', 0)
-        
-        # Add an AI insight
+        # Save the new analysis
         insight = AIInsight(
             case_id=case.id,
-            insight_type='reanalysis',
-            content=json.dumps(analysis, indent=2),
-            created_by_id=current_user.id
+            analysis_type='reanalysis',
+            content=json.dumps(analysis),
+            created_at=datetime.utcnow()
         )
         db.session.add(insight)
         db.session.commit()
         
         return jsonify({
             'status': 'success',
-            'case_id': case.id,
             'analysis': analysis
         })
         
     except Exception as e:
-        app.logger.error(f"Error in case analysis: {str(e)}")
         db.session.rollback()
+        app.logger.error(f"Error in analyze_case: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
