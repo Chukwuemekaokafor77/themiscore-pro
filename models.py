@@ -80,6 +80,10 @@ class Case(db.Model):
     title = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text)
     case_type = db.Column(db.String(100))
+    
+    # AI Classification field
+    category = db.Column(db.String(50), nullable=True)  # e.g., "family", "housing", etc.
+    
     status = db.Column(db.String(50), default='open')
     priority = db.Column(db.String(20), default='medium')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -115,7 +119,10 @@ class Case(db.Model):
             'assigned_to': self.assigned_user.to_dict() if self.assigned_user else None,
             'document_count': len(self.documents),
             'note_count': len(self.notes),
-            'actions': [ca.action.to_dict() for ca in self.case_actions]
+            'actions': [ca.action.to_dict() for ca in self.case_actions],
+            'category': self.category,
+            'insights': [insight.to_dict() for insight in self.insights],
+            'referrals': [referral.to_dict() for referral in self.referrals]
         }
 
 
@@ -180,6 +187,92 @@ class CaseAction(db.Model):
     case = db.relationship('Case', back_populates='case_actions')
     action = db.relationship('Action', back_populates='case_actions')
     assigned_to = db.relationship('User', back_populates='case_actions_assigned')
+
+
+class Lawyer(db.Model):
+    """Lawyer information for referrals"""
+    __tablename__ = 'lawyer'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    organization = db.Column(db.String(120))
+    phone = db.Column(db.String(50))
+    email = db.Column(db.String(120))
+    
+    # Must match Case.category values
+    specialization = db.Column(db.String(50), nullable=False)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    referrals = db.relationship('Referral', back_populates='lawyer')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'organization': self.organization,
+            'phone': self.phone,
+            'email': self.email,
+            'specialization': self.specialization,
+            'referral_count': len(self.referrals)
+        }
+
+
+class Referral(db.Model):
+    """Case referral to external lawyers"""
+    __tablename__ = 'referral'
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    lawyer_id = db.Column(db.Integer, db.ForeignKey('lawyer.id'), nullable=False)
+    status = db.Column(db.String(50), default='pending')  # pending, sent, accepted, declined
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    case = db.relationship('Case', backref=db.backref('referrals', lazy=True))
+    lawyer = db.relationship('Lawyer', back_populates='referrals')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'lawyer': self.lawyer.to_dict() if self.lawyer else None,
+            'status': self.status,
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class AIInsight(db.Model):
+    """AI-generated insights for cases"""
+    __tablename__ = 'ai_insight'
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    insight_text = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(100), nullable=True)  # e.g., 'case_strategy', 'document_analysis', etc.
+    confidence = db.Column(db.Float, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationship
+    case = db.relationship('Case', backref=db.backref('insights', lazy=True))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'insight_text': self.insight_text,
+            'category': self.category,
+            'confidence': self.confidence,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
 
 
 class Document(db.Model):

@@ -1,7 +1,7 @@
 services:
   - type: web
     name: themiscore-pro
-    env: python
+    runtime: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn app:app"
     envVars:
@@ -20,6 +20,4 @@ services:
 
 databases:
   - name: themiscore-db
-    databaseName: themiscore
-    user: themiscore_user
     plan: free

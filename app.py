@@ -1,24 +1,20 @@
 import os
-import time
 import requests
-import sys
-from flask import Flask, render_template, request, jsonify, url_for, redirect, flash, session, send_from_directory, send_file, abort, Response
+from flask import Flask, render_template, request, jsonify, url_for, redirect, flash, session, send_from_directory, send_file, abort, Response, current_app
 from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
-import re
-import os
 from dotenv import load_dotenv
 from flask_migrate import Migrate
 import mimetypes
-import base64
+from models import Case
 
 # Import database models
-from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction
+from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral
 
 # Import utility functions
-from utils import get_pagination, apply_case_filters, get_sort_params
+from utils import get_pagination, apply_case_filters, get_sort_params, analyze_case
 
 # Import custom filters
 from filters import time_ago, format_date, format_currency, pluralize
@@ -170,160 +166,6 @@ CASE_CATEGORIES = {
         ]
     }
 }
-
-def analyze_case_description(description):
-    """
-    Enhanced case analysis with improved entity extraction and case type detection.
-    Returns a dictionary with case type, confidence, entities, and suggested actions.
-    """
-    if not description:
-        return {
-            'case_type': 'other',
-            'confidence': 0,
-            'entities': {},
-            'suggested_actions': [],
-            'priority': 'medium',
-            'estimated_duration': '1-3 months',
-            'required_documents': []
-        }
-        
-    description = description.lower()
-    
-    # Enhanced case type patterns with weights
-    case_patterns = {
-        'personal_injury': {
-            'patterns': [
-                (r'car\s+accident|car\s+crash|motor\s+vehicle', 2),
-                (r'slip\s+and\s+fall|trip\s+and\s+fall', 2),
-                (r'medical\s+malpractice|wrongful\s+death', 3),
-                (r'personal\s+injury|negligence', 1.5),
-                (r'brain\s+injur|spinal\s+cord\s+injur', 3),
-                (r'dog\s+bite|animal\s+attack', 2),
-                (r'premises\s+liability', 2),
-                (r'product\s+liability|defective\s+product', 2.5)
-            ],
-            'suggested_actions': [
-                'Gather medical records and bills',
-                'Obtain police/accident reports',
-                'Document injuries with photos',
-                'Collect witness statements',
-                'Contact insurance companies',
-                'Calculate damages and losses',
-                'Schedule medical evaluation',
-                'Preserve evidence (photos, clothing, etc.)'
-            ],
-            'required_documents': [
-                'Medical Records',
-                'Police Reports',
-                'Insurance Information',
-                'Witness Statements',
-                'Photographic Evidence',
-                'Proof of Lost Wages',
-                'Medical Bills',
-                'Property Damage Estimates'
-            ],
-            'priority_factors': {
-                'severe_injury': 3,
-                'statute_limitations': 2,
-                'insurance_involved': 1
-            },
-            'estimated_duration': '3-18 months',
-            'success_rate': '70-80%',
-            'average_settlement': '$30,000 - $1,000,000+',
-            'key_considerations': [
-                'Statute of limitations',
-                'Insurance policy limits',
-                'Comparative negligence',
-                'Pre-existing conditions',
-                'Future medical needs'
-            ]
-        },
-        # Additional case types with similar detailed structures...
-    }
-    
-    # Initialize scores and results
-    case_type_scores = {case_type: 0 for case_type in case_patterns}
-    entities = {
-        'names': set(),
-        'dates': set(),
-        'amounts': set(),
-        'locations': set(),
-        'injuries': set(),
-        'vehicles': set(),
-        'insurance_companies': set()
-    }
-    
-    # Enhanced entity extraction
-    entities['names'].update(re.findall(r'\b(?:mr\.?|mrs\.?|ms\.?|dr\.?)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b', description, re.IGNORECASE))
-    entities['dates'].update(re.findall(r'\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b', description, re.IGNORECASE))
-    entities['amounts'].update(re.findall(r'\$\d+(?:\.\d{2})?|\d+\s*(?:dollars|USD)', description, re.IGNORECASE))
-    entities['locations'].update(re.findall(r'\b(?:at|in|near|on|by|from)\s+([A-Z][a-zA-Z\s]+(?:,\s*[A-Z]{2})?)', description))
-    
-    # Injury-specific entity extraction
-    injury_keywords = ['fracture', 'broken', 'laceration', 'concussion', 'whiplash', 'sprain', 'strain', 'tear', 'injury']
-    entities['injuries'].update([word for word in injury_keywords if word in description])
-    
-    # Score each case type
-    for case_type, case_data in case_patterns.items():
-        for pattern, weight in case_data['patterns']:
-            if re.search(pattern, description, re.IGNORECASE):
-                case_type_scores[case_type] += weight
-    
-    # Determine priority based on content
-    priority_factors = {
-        'urgent_keywords': ['emergency', 'immediate', 'right away', 'asap', 'statute expir', 'deadline'],
-        'high_priority': ['lawsuit', 'sue', 'suing', 'court date', 'trial', 'hearing'],
-        'medium_priority': ['consultation', 'advice', 'review', 'document'],
-        'low_priority': ['general question', 'information', 'potential case']
-    }
-    
-    priority_score = 0
-    for level, keywords in priority_factors.items():
-        for keyword in keywords:
-            if keyword in description:
-                if 'urgent' in level:
-                    priority_score += 3
-                elif 'high' in level:
-                    priority_score += 2
-                elif 'medium' in level:
-                    priority_score += 1
-    
-    if priority_score >= 3:
-        priority = 'high'
-    elif priority_score >= 1:
-        priority = 'medium'
-    else:
-        priority = 'low'
-    
-    # Get the highest scoring case type
-    if max(case_type_scores.values()) > 0:
-        predicted_case_type = max(case_type_scores, key=case_type_scores.get)
-        confidence = case_type_scores[predicted_case_type] / (sum(case_type_scores.values()) or 1)
-    else:
-        predicted_case_type = 'other'
-        confidence = 0
-    
-    # Get case type specific data
-    case_data = case_patterns.get(predicted_case_type, {})
-    
-    # Clean up entities (remove empty matches and convert to list)
-    for key in entities:
-        entities[key] = [e for e in entities[key] if e.strip()]
-    
-    return {
-        'case_type': predicted_case_type,
-        'case_type_display': ' '.join(word.capitalize() for word in predicted_case_type.split('_')),
-        'confidence': round(confidence, 2),
-        'entities': entities,
-        'suggested_actions': case_data.get('suggested_actions', []),
-        'required_documents': case_data.get('required_documents', []),
-        'priority': priority,
-        'estimated_duration': case_data.get('estimated_duration', '1-3 months'),
-        'success_rate': case_data.get('success_rate', 'Varies'),
-        'average_settlement': case_data.get('average_settlement', 'Varies'),
-        'key_considerations': case_data.get('key_considerations', []),
-        'analysis_timestamp': datetime.utcnow().isoformat()
-    }
 
 # Helper functions
 def save_uploaded_file(file):
@@ -505,7 +347,15 @@ def actions():
         db.joinedload(Action.case_actions).joinedload(CaseAction.case),
         db.joinedload(Action.assigned_to)
     ).all()
-    return render_template('actions.html', actions=actions)
+    
+    # Get all cases and users for the template
+    cases = Case.query.all()
+    users = User.query.all()
+    
+    return render_template('actions.html', 
+                         actions=actions, 
+                         cases=cases,
+                         users=users)
 
 @app.route('/actions/add', methods=['GET', 'POST'])
 @login_required
@@ -572,7 +422,6 @@ def view_action(action_id):
     action = db.session.get(Action, action_id)
     if action is None:
         abort(404, description="Action not found")
-    return render_template('view_action.html', action=action)
 
 # Documents routes
 @app.route('/documents')
@@ -714,8 +563,9 @@ def delete_document(document_id):
     return redirect(url_for('documents'))
 
 @app.route('/api/cases', methods=['POST'])
+@login_required
 def create_case():
-    """Create a new case from the intake form."""
+    """Create a new case from the intake form with rule-based analysis."""
     data = request.get_json()
     
     # Validate required fields
@@ -738,50 +588,77 @@ def create_case():
             db.session.add(client)
             db.session.flush()  # Get the client ID
         
-        # Create case
+        # Analyze the case using rule-based approach
+        case_description = data['case_description']
+        analysis = analyze_case(case_description)
+        
+        # Create case with analysis insights
         new_case = Case(
             title=data['case_title'],
-            description=data['case_description'],
-            case_type=data.get('case_type', 'other'),
+            description=case_description,
+            case_type=analysis.get('category', 'other'),
             status='open',
-            priority=data.get('priority', 'medium'),
+            priority=data.get('priority', 'high' if analysis.get('risk_level') == 'high' else 'medium'),
             client_id=client.id,
-            created_by_id=1,  # In a real app, this would be the logged-in user
+            created_by_id=current_user.id,
             assigned_to_id=data.get('assigned_to')
         )
         db.session.add(new_case)
-        db.session.flush()  # Get the case ID
+        db.session.flush()
         
-        # Add default actions based on case type
-        case_actions = CASE_CATEGORIES.get(data.get('case_type', 'other'), {}).get('actions', [])
-        for action_text in case_actions:
-            action = db.session.get(Action, action_text)
-            if action is None:
-                action = Action(title=action_text, action_type='default')
+        # Save analysis to the database
+        insight = AIInsight(
+            case_id=new_case.id,
+            insight_text=analysis.get('summary', 'No analysis available'),
+            category=analysis.get('category', 'other'),
+            confidence=analysis.get('confidence', 0.0),
+            metadata={
+                'risk_level': analysis.get('risk_level'),
+                'entities': analysis.get('entities', {})
+            }
+        )
+        db.session.add(insight)
+        
+        # Add suggested actions
+        for action_text in analysis.get('suggested_actions', [])[:5]:
+            action = Action.query.filter_by(title=action_text).first()
+            if not action:
+                action = Action(
+                    title=action_text,
+                    action_type='suggested',
+                    description='Suggested action based on case analysis',
+                    created_by_id=current_user.id
+                )
                 db.session.add(action)
                 db.session.flush()
             
-            # Add action to case with default assignment
-            db.session.execute(
-                case_actions.insert().values(
-                    case_id=new_case.id,
-                    action_id=action.id,
-                    status='pending',
-                    assigned_to=1  # Default to admin
-                )
+            case_action = CaseAction(
+                case_id=new_case.id,
+                action_id=action.id,
+                status='pending',
+                assigned_to_id=current_user.id,
+                notes='Automatically added by case analysis'
             )
+            db.session.add(case_action)
         
         db.session.commit()
         
         return jsonify({
             'status': 'success',
-            'message': 'Case created successfully',
-            'case_id': new_case.id
+            'message': 'Case created successfully with analysis',
+            'case_id': new_case.id,
+            'analysis': {
+                'category': analysis.get('category'),
+                'risk_level': analysis.get('risk_level'),
+                'summary': analysis.get('summary'),
+                'suggested_actions': analysis.get('suggested_actions', [])
+            }
         }), 201
         
     except Exception as e:
         db.session.rollback()
-        return jsonify({'error': str(e)}), 500
+        app.logger.error(f"Error creating case: {str(e)}")
+        return jsonify({'error': f'Failed to create case: {str(e)}'}), 500
 
 @app.route('/api/cases/<int:case_id>', methods=['GET'])
 def get_case(case_id):
@@ -790,6 +667,78 @@ def get_case(case_id):
     if case is None:
         abort(404, description="Case not found")
     return jsonify(case.to_dict())
+
+@app.route('/cases/<int:case_id>/ai-insights')
+@login_required
+def case_ai_insights(case_id):
+    """Display AI insights for a case."""
+    case = db.session.get(Case, case_id)
+    if case is None:
+        abort(404, description="Case not found")
+    
+    # Get all AI insights for this case, ordered by creation date (newest first)
+    insights = AIInsight.query.filter_by(case_id=case_id)\
+                            .order_by(AIInsight.created_at.desc())\
+                            .all()
+    
+    # Convert insights to dict and add any additional processing
+    insights_data = []
+    for insight in insights:
+        insight_dict = insight.to_dict()
+        # Parse the insight text to extract structured data if needed
+        # This is a simplified example - you might need to adjust based on your data structure
+        insight_dict['suggested_actions'] = getattr(insight, 'suggested_actions', [])
+        insight_dict['entities'] = getattr(insight, 'entities', [])
+        insights_data.append(insight_dict)
+    
+    return render_template('ai_insights.html', 
+                         case=case, 
+                         insights=insights_data)
+
+@app.route('/api/cases/<int:case_id>/analyze', methods=['POST'])
+@login_required
+def analyze_case_endpoint(case_id):
+    """Analyze a case using rule-based analysis and return insights."""
+    case = db.session.get(Case, case_id)
+    if case is None:
+        return jsonify({'error': 'Case not found'}), 404
+    
+    try:
+        # Get the case description
+        description = case.description or ''
+        
+        # Analyze the case
+        analysis = analyze_case(description)
+        
+        # Save the insight to the database
+        insight = AIInsight(
+            case_id=case.id,
+            insight_text=analysis.get('summary', 'No analysis available'),
+            category=analysis.get('category', 'other'),
+            confidence=analysis.get('confidence', 0.0),
+            metadata={
+                'risk_level': analysis.get('risk_level'),
+                'entities': analysis.get('entities', {})
+            }
+        )
+        db.session.add(insight)
+        
+        # Update the case category if not already set
+        if not case.category and analysis.get('category'):
+            case.category = analysis['category']
+        
+        db.session.commit()
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Case analyzed successfully',
+            'analysis': analysis
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error analyzing case: {str(e)}")
+        return jsonify({'error': f'Failed to analyze case: {str(e)}'}), 500
 
 @app.route('/api/cases/<int:case_id>', methods=['PUT'])
 def update_case(case_id):
@@ -850,6 +799,10 @@ def internal_error(error):
     db.session.rollback()
     return jsonify({'error': 'An internal error occurred'}), 500
 
+# Initialize AI Analyzer
+from ai_services import AICaseAnalyzer
+ai_analyzer = AICaseAnalyzer()
+
 # Transcription routes
 @app.route('/transcribe', methods=['GET', 'POST'])
 @login_required
@@ -870,110 +823,69 @@ def transcribe():
         file_ext = audio_file.filename.rsplit('.', 1)[1].lower() if '.' in audio_file.filename else ''
         if file_ext not in allowed_extensions:
             return jsonify({'error': f'Unsupported file type. Allowed types: {allowed_extensions}'}), 400
-            
-        temp_path = None
+        
         try:
-            # Save the file temporarily with proper extension
-            temp_filename = f'temp_audio_{int(time.time())}.{file_ext}'
-            temp_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
-            audio_file.save(temp_path)
+            # Save the file temporarily
+            filename = secure_filename(audio_file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            audio_file.save(filepath)
             
             # Upload to AssemblyAI
-            def read_file(filename, chunk_size=5242880):
-                with open(filename, 'rb') as _file:
-                    while True:
-                        data = _file.read(chunk_size)
-                        if not data:
-                            break
-                        yield data
-            
-            # Upload the audio file
-            upload_response = requests.post(
-                ASSEMBLYAI_UPLOAD_URL,
-                headers={'authorization': ASSEMBLYAI_API_KEY},
-                data=read_file(temp_path)
-            )
-            
+            with open(filepath, 'rb') as f:
+                upload_response = requests.post(
+                    ASSEMBLYAI_UPLOAD_URL,
+                    headers=ASSEMBLYAI_HEADERS,
+                    data=f.read()
+                )
+        
             if upload_response.status_code != 200:
-                error_msg = upload_response.json().get('error', 'Failed to upload audio')
-                return jsonify({'error': f'Upload failed: {error_msg}'}), 500
+                return jsonify({'error': 'Failed to upload file to AssemblyAI'}), 500
+        
+            audio_url = upload_response.json().get('upload_url')
             
-            audio_url = upload_response.json()['upload_url']
-            
-            # Start transcription with additional parameters for better accuracy
-            transcription_response = requests.post(
+            # Start transcription with additional processing
+            transcript_response = requests.post(
                 ASSEMBLYAI_TRANSCRIPTION_URL,
                 headers=ASSEMBLYAI_HEADERS,
                 json={
                     'audio_url': audio_url,
                     'speaker_labels': True,
-                    'language_code': 'en_us',
-                    'punctuate': True,
-                    'format_text': True,
-                    'dual_channel': True,
-                    'speech_model': 'best'
+                    'word_boost': ['legal', 'court', 'case', 'law', 'judge', 'attorney', 'client'],
+                    'filter_profanity': True,
+                    'auto_highlights': True,
+                    'iab_categories': True,
+                    'entity_detection': True,
+                    'speakers_expected': 2  # Expecting client and attorney
                 }
             )
+        
+            if transcript_response.status_code != 200:
+                return jsonify({'error': 'Failed to start transcription'}), 500
             
-            if transcription_response.status_code != 200:
-                error_msg = transcription_response.json().get('error', 'Failed to start transcription')
-                return jsonify({'error': f'Transcription failed to start: {error_msg}'}), 500
+            transcript_id = transcript_response.json().get('id')
             
-            transcript_id = transcription_response.json()['id']
-            max_attempts = 60  # 5 minutes max wait time (5 seconds * 60 attempts)
-            attempts = 0
+            # Save the transcription job to the database
+            transcription = Transcription(
+                transcript_id=transcript_id,
+                status='processing',
+                original_filename=filename,
+                file_path=filepath,
+                created_by_id=current_user.id if current_user.is_authenticated else None
+            )
+            db.session.add(transcription)
+            db.session.commit()
             
-            # Poll for transcription completion with timeout
-            while attempts < max_attempts:
-                attempts += 1
-                status_response = requests.get(
-                    f"{ASSEMBLYAI_TRANSCRIPTION_URL}/{transcript_id}",
-                    headers=ASSEMBLYAI_HEADERS
-                )
-                
-                if status_response.status_code != 200:
-                    time.sleep(5)  # Wait 5 seconds before retrying
-                    continue
-                
-                status = status_response.json().get('status')
-                
-                if status == 'completed':
-                    transcription = status_response.json()
-                    
-                    # Clean up
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                        
-                    return jsonify({
-                        'text': transcription['text'],
-                        'speakers': transcription.get('utterances', []),
-                        'confidence': transcription.get('confidence', 0),
-                        'words': transcription.get('words', [])
-                    })
-                    
-                elif status in ['failed', 'error']:
-                    error_msg = status_response.json().get('error', 'Transcription failed')
-                    return jsonify({'error': f'Transcription failed: {error_msg}'}), 500
-                
-                time.sleep(5)  # Check every 5 seconds
-            
-            return jsonify({'error': 'Transcription timed out'}), 504
-            
-        except requests.exceptions.RequestException as e:
-            app.logger.error(f'API request failed: {str(e)}')
-            return jsonify({'error': 'Failed to connect to transcription service'}), 503
+            # Return the transcript ID for polling
+            return jsonify({
+                'transcript_id': transcript_id,
+                'status': 'processing',
+                'message': 'Transcription in progress',
+                'transcription_id': transcription.id
+            }), 202
             
         except Exception as e:
-            app.logger.error(f'Transcription error: {str(e)}')
-            return jsonify({'error': f'An error occurred during transcription: {str(e)}'}), 500
-            
-        finally:
-            # Ensure temp file is always cleaned up
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception as e:
-                    app.logger.error(f'Failed to clean up temp file: {str(e)}')
+            app.logger.error(f"Error in transcription: {str(e)}")
+            return jsonify({'error': str(e)}), 500
     
     # For GET requests, show the transcription interface
     return render_template('transcribe.html')
@@ -981,11 +893,131 @@ def transcribe():
 @app.route('/transcribe/status/<transcript_id>', methods=['GET'])
 @login_required
 def transcription_status(transcript_id):
-    response = requests.get(
-        f"{ASSEMBLYAI_TRANSCRIPTION_URL}/{transcript_id}",
-        headers=ASSEMBLYAI_HEADERS
-    )
-    return jsonify(response.json())
+    try:
+        # Get the transcription status from AssemblyAI
+        response = requests.get(
+            f"{ASSEMBLYAI_TRANSCRIPTION_URL}/{transcript_id}",
+            headers=ASSEMBLYAI_HEADERS
+        )
+        
+        if response.status_code != 200:
+            return jsonify({'error': 'Failed to get transcription status'}), 500
+            
+        data = response.json()
+        
+        # If transcription is complete, analyze it with our AI
+        if data.get('status') == 'completed':
+            transcript_text = data.get('text', '')
+            
+            # Analyze the transcript with our AI
+            analysis = ai_analyzer.analyze_text(transcript_text)
+            
+            # Add AI analysis to the response
+            data['ai_analysis'] = analysis
+            
+            # Extract key information for quick access
+            case_type = analysis.get('case_analysis', {}).get('case_type', 'other')
+            confidence = analysis.get('case_analysis', {}).get('confidence', 0)
+            
+            # Create a new case with the analysis
+            if current_user.is_authenticated:
+                case = Case(
+                    title=f"{case_type.replace('_', ' ').title()} - {datetime.utcnow().strftime('%Y-%m-%d')}",
+                    description=transcript_text,
+                    status='open',
+                    case_type=case_type,
+                    confidence=confidence,
+                    created_by_id=current_user.id,
+                    metadata={
+                        'transcript_id': transcript_id,
+                        'analysis': analysis
+                    }
+                )
+                db.session.add(case)
+                db.session.commit()
+                
+                # Create an AI insight for the case
+                insight = AIInsight(
+                    case_id=case.id,
+                    insight_type='initial_analysis',
+                    content=json.dumps(analysis, indent=2),
+                    created_by_id=current_user.id
+                )
+                db.session.add(insight)
+                db.session.commit()
+                
+                data['case_id'] = case.id
+        
+        return jsonify(data)
+        
+    except Exception as e:
+        app.logger.error(f"Error in transcription status: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/analyze/text', methods=['POST'])
+@login_required
+def analyze_text():
+    """Analyze text with AI and return case insights."""
+    try:
+        data = request.get_json()
+        text = data.get('text', '').strip()
+        
+        if not text:
+            return jsonify({'error': 'No text provided'}), 400
+            
+        # Analyze the text with our AI
+        analysis = ai_analyzer.analyze_text(text)
+        
+        return jsonify({
+            'status': 'success',
+            'analysis': analysis
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error in text analysis: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/cases/<int:case_id>/analyze', methods=['POST'])
+@login_required
+def analyze_case(case_id):
+    """Re-analyze a case with updated AI models."""
+    try:
+        case = Case.query.get_or_404(case_id)
+        
+        # Make sure the user has permission to access this case
+        if case.created_by_id != current_user.id and not current_user.is_admin:
+            return jsonify({'error': 'Unauthorized'}), 403
+            
+        # Get the case text to analyze
+        text = case.description or ''
+        
+        # Analyze with our AI
+        analysis = ai_analyzer.analyze_text(text)
+        
+        # Update the case with new analysis
+        case.case_type = analysis.get('case_analysis', {}).get('case_type', 'other')
+        case.confidence = analysis.get('case_analysis', {}).get('confidence', 0)
+        
+        # Add an AI insight
+        insight = AIInsight(
+            case_id=case.id,
+            insight_type='reanalysis',
+            content=json.dumps(analysis, indent=2),
+            created_by_id=current_user.id
+        )
+        db.session.add(insight)
+        db.session.commit()
+        
+        return jsonify({
+            'status': 'success',
+            'case_id': case.id,
+            'analysis': analysis
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error in case analysis: {str(e)}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

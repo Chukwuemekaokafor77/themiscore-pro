@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+
+{% block title %}Case Analysis - {{ case.title }}{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-10 offset-md-1">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h4 class="mb-0">
+                            <i class="fas fa-chart-bar me-2"></i>Case Analysis
+                        </h4>
+                        <div>
+                            <a href="{{ url_for('view_case', case_id=case.id) }}" class="btn btn-sm btn-light">
+                                <i class="fas fa-arrow-left me-1"></i> Back to Case
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card-body">
+                    <h5 class="mb-4">{{ case.title }}</h5>
+                    
+                    {% if insights %}
+                        {% for insight in insights %}
+                        <div class="card mb-4">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h6 class="mb-0">
+                                    <i class="fas fa-chart-pie me-2"></i>Analysis Results
+                                    {% if insight.confidence %}
+                                    <span class="badge bg-{{ 'success' if insight.confidence > 0.7 else 'warning' if insight.confidence > 0.4 else 'danger' }} ms-2">
+                                        {{ "%.0f"|format(insight.confidence * 100) }}% confidence
+                                    </span>
+                                    {% endif %}
+                                </h6>
+                                {% if insight.created_at %}
+                                <small class="text-muted">{{ insight.created_at.strftime('%B %d, %Y at %H:%M') }}</small>
+                                {% endif %}
+                            </div>
+                            
+                            <div class="card-body">
+                                <div class="row mb-4">
+                                    <div class="col-md-6">
+                                        <div class="card h-100">
+                                            <div class="card-header bg-light">
+                                                <h6 class="card-title mb-0">
+                                                    <i class="fas fa-tag me-2"></i>Case Category
+                                                </h6>
+                                            </div>
+                                            <div class="card-body">
+                                                <h4 class="text-center">
+                                                    <span class="badge bg-primary text-uppercase">
+                                                        {{ insight.category or 'General' }}
+                                                    </span>
+                                                </h4>
+                                                {% if insight.confidence %}
+                                                <div class="progress mt-2">
+                                                    <div class="progress-bar bg-{{ 'success' if insight.confidence > 0.7 else 'warning' if insight.confidence > 0.4 else 'danger' }}"
+                                                         role="progressbar"
+                                                         style="width: {{ insight.confidence * 100 }}%"
+                                                         aria-valuenow="{{ insight.confidence * 100 }}"
+                                                         aria-valuemin="0"
+                                                         aria-valuemax="100">
+                                                        {{ "%.0f"|format(insight.confidence * 100) }}% confidence
+                                                    </div>
+                                                </div>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="card h-100">
+                                            <div class="card-header bg-light">
+                                                <h6 class="card-title mb-0">
+                                                    <i class="fas fa-exclamation-triangle me-2"></i>Risk Level
+                                                </h6>
+                                            </div>
+                                            <div class="card-body text-center">
+                                                {% set risk_level = insight.metadata.risk_level if insight.metadata and insight.metadata.risk_level else 'medium' %}
+                                                <h2 class="mb-0">
+                                                    <span class="badge bg-{{ 'danger' if risk_level == 'high' else 'warning' if risk_level == 'medium' else 'success' }} p-3">
+                                                        {{ risk_level|title }}
+                                                    </span>
+                                                </h2>
+                                                <p class="text-muted mt-2 mb-0">
+                                                    {% if risk_level == 'high' %}
+                                                        Immediate attention recommended
+                                                    {% elif risk_level == 'medium' %}
+                                                        Review recommended
+                                                    {% else %}
+                                                        Standard priority
+                                                    {% endif %}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="card mb-4">
+                                    <div class="card-header">
+                                        <h6 class="mb-0"><i class="fas fa-file-alt me-2"></i>Analysis Summary</h6>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="p-3 bg-light rounded">
+                                            {{ insight.insight_text|default('No analysis summary available.')|nl2br }}
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="card h-100">
+                                            <div class="card-header">
+                                                <h6 class="mb-0"><i class="fas fa-tasks me-2"></i>Suggested Actions</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                {% if insight.metadata and insight.metadata.suggested_actions %}
+                                                    <ul class="list-group">
+                                                        {% for action in insight.metadata.suggested_actions[:5] %}
+                                                            <li class="list-group-item">
+                                                                <i class="fas fa-check-circle text-success me-2"></i>{{ action }}
+                                                            </li>
+                                                        {% endfor %}
+                                                    </ul>
+                                                {% else %}
+                                                    <p class="text-muted mb-0">No specific actions suggested.</p>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="card h-100">
+                                            <div class="card-header">
+                                                <h6 class="mb-0"><i class="fas fa-tags me-2"></i>Key Entities</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                {% if insight.metadata and insight.metadata.entities %}
+                                                    <div class="d-flex flex-wrap gap-2">
+                                                        {% for entity_type, entities in insight.metadata.entities.items() %}
+                                                            {% for entity in entities[:5] %}
+                                                                <span class="badge bg-secondary" data-bs-toggle="tooltip" title="{{ entity_type|title }}">
+                                                                    {{ entity }}
+                                                                </span>
+                                                            {% endfor %}
+                                                        {% endfor %}
+                                                    </div>
+                                                {% else %}
+                                                    <p class="text-muted mb-0">No key entities identified.</p>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="card-footer bg-light">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">
+                                        <i class="fas fa-info-circle me-1"></i> Analysis generated using rule-based system
+                                    </small>
+                                    <button class="btn btn-sm btn-outline-primary" id="reanalyzeBtn" data-case-id="{{ case.id }}">
+                                        <i class="fas fa-sync-alt me-1"></i> Re-analyze
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="text-center py-5">
+                            <i class="fas fa-search fa-3x text-muted mb-3"></i>
+                            <h5>No analysis available for this case yet.</h5>
+                            <p class="text-muted mb-4">Click the button below to analyze this case.</p>
+                            <button class="btn btn-primary" id="analyzeBtn">
+                                <i class="fas fa-chart-bar me-2"></i>Analyze Case
+                            </button>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+$(document).ready(function() {
+    // Initialize tooltips
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
+    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl)
+    });
+    
+    // Handle analyze button click
+    $('#analyzeBtn, #reanalyzeBtn').click(function() {
+        const $btn = $(this);
+        const caseId = $btn.data('case-id') || '{{ case.id }}';
+        const originalText = $btn.html();
+        
+        $btn.prop('disabled', true).html(
+            '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Analyzing...'
+        );
+        
+        // Show loading state
+        if ($btn.attr('id') === 'analyzeBtn') {
+            $('.text-center').html(
+                '<div class="d-flex justify-content-center my-5">' +
+                '  <div class="spinner-border text-primary" role="status">' +
+                '    <span class="visually-hidden">Loading...</span>' +
+                '  </div>' +
+                '  <p class="ms-3 align-self-center mb-0">Analyzing case. This may take a moment...</p>' +
+                '</div>'
+            );
+        }
+        
+        // Make the AJAX request
+        $.ajax({
+            url: '{{ url_for("analyze_case_endpoint", case_id=case.id) }}',
+            method: 'POST',
+            success: function(response) {
+                if (response.status === 'success') {
+                    // Reload the page to show the new analysis
+                    window.location.reload();
+                } else {
+                    showAlert('Error: ' + (response.error || 'Failed to analyze case'), 'danger');
+                    $btn.prop('disabled', false).html(originalText);
+                }
+            },
+            error: function(xhr) {
+                const error = xhr.responseJSON && xhr.responseJSON.error || 'Failed to analyze case';
+                showAlert('Error: ' + error, 'danger');
+                $btn.prop('disabled', false).html(originalText);
+            }
+        });
+    });
+    
+    // Helper function to show alerts
+    function showAlert(message, type) {
+        const alertHtml = `
+            <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        `;
+        
+        // Add alert to the top of the card body
+        $('.card-body').prepend(alertHtml);
+        
+        // Auto-dismiss after 5 seconds
+        setTimeout(() => {
+            $('.alert').alert('close');
+        }, 5000);
+    }
+});
+</script>
+{% endblock %}

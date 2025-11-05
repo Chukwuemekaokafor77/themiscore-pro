@@ -111,7 +111,7 @@
                             <label for="case_id" class="form-label">Related Case (Optional)</label>
                             <select class="form-select" id="case_id" name="case_id">
                                 <option value="">Select a case</option>
-                                {% for case in Case.query.all() %}
+                                {% for case in cases %}
                                     <option value="{{ case.id }}">{{ case.title }}</option>
                                 {% endfor %}
                             </select>
@@ -119,7 +119,7 @@
                         <div class="col-md-6">
                             <label for="assigned_to_id" class="form-label">Assign To</label>
                             <select class="form-select" id="assigned_to_id" name="assigned_to_id" required>
-                                {% for user in User.query.all() %}
+                                {% for user in users %}
                                     <option value="{{ user.id }}" {% if user.id == current_user.id %}selected{% endif %}>
                                         {{ user.first_name }} {{ user.last_name }} ({{ user.role|title }})
                                     </option>
