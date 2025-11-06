@@ -102,6 +102,32 @@
 
     <!-- Sidebar -->
     <div class="col-md-4">
+        <!-- Deadlines Card -->
+        <div class="card mb-4">
+            <div class="card-header">
+                Deadlines <span class="badge bg-primary rounded-pill">{{ deadlines|length if deadlines else 0 }}</span>
+            </div>
+            <div class="card-body">
+                {% if deadlines %}
+                    <div class="list-group list-group-flush">
+                        {% for dl in deadlines %}
+                            <div class="list-group-item">
+                                <div class="d-flex w-100 justify-content-between">
+                                    <h6 class="mb-1">{{ dl.name }}</h6>
+                                    <small class="text-muted">{{ dl.due_date.strftime('%b %d, %Y') }}</small>
+                                </div>
+                                <small class="text-muted">{{ dl.source|replace('_',' ')|title if dl.source else '' }}</small>
+                                {% if dl.notes %}
+                                    <div class="small mt-1">{{ dl.notes }}</div>
+                                {% endif %}
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="text-muted mb-0">No deadlines set.</p>
+                {% endif %}
+            </div>
+        </div>
         <!-- Documents Card -->
         <div class="card mb-4">
             <div class="card-header">

@@ -279,3 +279,50 @@
 .shadow-sm {
     box-shadow: 0 .125rem .25rem rgba(0,0,0,.075)!important;
 }
+
+/* Drag & Drop Upload Zone */
+.drop-zone {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 20px;
+    border: 2px dashed #ced4da;
+    border-radius: 10px;
+    background: #ffffff;
+    color: #6c757d;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+.drop-zone.drag-over {
+    background: #f1f8ff;
+    border-color: #0d6efd;
+}
+
+/* Dark mode friendly styles */
+@media (prefers-color-scheme: dark) {
+    .recording-controls {
+        background: rgba(33, 37, 41, 0.6);
+        border-color: #495057;
+    }
+    .audio-visualizer {
+        background: #2b3035;
+    }
+    .audio-player {
+        background: #2b3035;
+    }
+    .transcription-container {
+        background: #2b3035;
+        border-color: #3a3f44;
+        color: #e9ecef;
+    }
+    .drop-zone {
+        background: #2b3035;
+        border-color: #495057;
+        color: #ced4da;
+    }
+    .drop-zone.drag-over {
+        background: #24364d;
+        border-color: #6ea8fe;
+    }
+}

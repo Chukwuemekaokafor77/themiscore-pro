@@ -44,6 +44,34 @@ class User(db.Model):
         }
 
 
+class Deadline(db.Model):
+    """Deadline tracking for cases (e.g., statutes, evidence retention, EEOC)."""
+    __tablename__ = 'deadline'
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    name = db.Column(db.String(200), nullable=False)
+    due_date = db.Column(db.DateTime, nullable=False)
+    source = db.Column(db.String(100), nullable=True)  # e.g., 'slip_fall_evidence', 'eeoc', 'statute'
+    notes = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    case = db.relationship('Case', backref=db.backref('deadlines', lazy=True, cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'name': self.name,
+            'due_date': self.due_date.isoformat() if self.due_date else None,
+            'source': self.source,
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Client(db.Model):
     """Client information model"""
     __tablename__ = 'client'
@@ -337,4 +365,41 @@ class CaseNote(db.Model):
             'is_private': self.is_private,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'created_by': self.created_by.to_dict() if self.created_by else None
+        }
+
+
+class Transcript(db.Model):
+    """Stored transcripts from STT providers"""
+    __tablename__ = 'transcript'
+
+    id = db.Column(db.Integer, primary_key=True)
+    provider = db.Column(db.String(50), nullable=False)  # e.g., 'assemblyai'
+    external_id = db.Column(db.String(128), nullable=False, index=True)  # provider transcript id
+    status = db.Column(db.String(50), nullable=False, default='processing')
+    text = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Foreign keys
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+
+    # Relationships
+    client = db.relationship('Client', backref=db.backref('transcripts', lazy=True))
+    case = db.relationship('Case', backref=db.backref('transcripts', lazy=True))
+    user = db.relationship('User', backref=db.backref('transcripts', lazy=True))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'provider': self.provider,
+            'external_id': self.external_id,
+            'status': self.status,
+            'text': self.text,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'client_id': self.client_id,
+            'case_id': self.case_id,
+            'user_id': self.user_id,
         }

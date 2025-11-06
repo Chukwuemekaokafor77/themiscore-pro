@@ -41,7 +41,7 @@ def apply_case_filters(query, args):
             or_(
                 Case.title.ilike(search),
                 Case.description.ilike(search),
-                Case.case_number.ilike(search)
+                # Case.case_number does not exist; limit search to title/description
             )
         )
     
@@ -62,7 +62,6 @@ def get_sort_params(args, default_sort='-created_at'):
         'priority': Case.priority,
         'created_at': Case.created_at,
         'updated_at': Case.updated_at,
-        'case_number': Case.case_number,
         'client_name': 'Client.last_name'  # This will be handled specially
     }
     
@@ -246,5 +245,168 @@ def analyze_case(description):
         'suggested_actions': suggested_actions.get(category, default_actions)[:5],
         'risk_level': risk_level,
         'summary': summary
+    }
+
+# ---------------- Scenario-focused Analyzer ---------------- #
+RELATIVE_DATE_PATTERNS = [
+    r"yesterday",
+    r"last\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+    r"last\s+week",
+    r"last\s+month",
+    r"\b\d{1,2}\s*(?:am|pm)\b",
+]
+
+def extract_relative_dates(text):
+    if not text:
+        return []
+    found = []
+    for pat in RELATIVE_DATE_PATTERNS:
+        matches = re.findall(pat, text, flags=re.IGNORECASE)
+        if matches:
+            found.extend(matches)
+    return list(set(found))
+
+def analyze_intake_text_scenarios(text):
+    """Scenario analyzer for four core intake scenarios.
+    Returns a structured dict with: category, urgency, department, priority, key_facts, dates, suggested_actions, checklists.
+    """
+    if not text:
+        return {
+            'category': 'other',
+            'urgency': 'medium',
+            'department': 'General',
+            'priority': 'Medium',
+            'key_facts': {},
+            'dates': [],
+            'suggested_actions': ['Review case details', 'Schedule client meeting'],
+            'checklists': {}
+        }
+
+    t = text.lower()
+    ents = extract_entities(text)
+    rel_dates = extract_relative_dates(text)
+    dates = list(set(ents.get('dates', []) + rel_dates))
+
+    def result(category, department, priority, urgency, key_facts, suggested_actions, checklists):
+        return {
+            'category': category,
+            'department': department,
+            'priority': priority,
+            'urgency': urgency,
+            'key_facts': key_facts,
+            'dates': dates,
+            'suggested_actions': suggested_actions,
+            'checklists': checklists
+        }
+
+    # Scenario 1: Slip and Fall at Walmart (Premises Liability)
+    if any(k in t for k in ['walmart']) and any(k in t for k in ['slip', 'slipped']) and any(k in t for k in ['water', 'wet floor', 'produce']):
+        key_facts = {
+            'store': 'Walmart',
+            'hazard': 'Wet floor/water',
+            'injuries': 'Back/knee' if ('back' in t or 'knee' in t) else None,
+            'medical_visit': 'Yes' if ('hospital' in t or 'er' in t or 'emergency' in t) else 'Unknown',
+            'warning_sign': 'No' if ('no sign' in t or 'no warning' in t or 'no wet floor sign' in t) else 'Unknown',
+        }
+        suggested_actions = [
+            'Send evidence preservation letter to Walmart within 1 hour',
+            'Request staff list and cleaning logs for incident day',
+            'Request security footage (produce, entrance, registers) 2h window',
+            'Obtain medical records and generate HIPAA release',
+            'Collect client details (shoes, photos, witnesses, incident report)'
+        ]
+        checklists = {
+            'medical_records': ['ER records', 'Imaging', 'Doctor notes', 'Prescriptions', 'PT records', 'Follow-ups'],
+            'client_questions': ['Shoes worn', 'Photos taken', 'Reported to employee', 'Incident report filed', 'Witnesses info', 'Nature/duration of spill']
+        }
+        return result(
+            'Personal Injury - Premises Liability', 'Personal Injury', 'High', 'High', key_facts, suggested_actions, checklists
+        )
+
+    # Scenario 2: Car Accident
+    if ('accident' in t or 'collision' in t or 'crash' in t) and any(k in t for k in ['highway', 'road', 'intersection']):
+        insurer = None
+        for name in ['statefarm', 'geico', 'progressive', 'allstate', 'farmers']:
+            if name in t:
+                insurer = name.title()
+                break
+        key_facts = {
+            'location': 'Highway/Intersection',
+            'other_driver': 'Red pickup' if 'red pickup' in t else 'Unknown',
+            'violation': 'Ran red light' if 'ran a red light' in t or 'ran the red light' in t else 'Unknown',
+            'injury': 'Neck' if 'neck' in t else ('Injured' if 'injur' in t else 'Unknown'),
+            'vehicle_totaled': True if 'totaled' in t else False,
+            'other_insurance': insurer,
+        }
+        suggested_actions = [
+            'Request police accident report and preserve dash/911/witness/camera data',
+            'Request DOT traffic/red-light camera footage 30m window',
+            'Send letters of representation to client and adverse insurers',
+            'Collect vehicle details (VIN, photos, estimates, KBB value)',
+            'Schedule medical evaluation within 48 hours'
+        ]
+        checklists = {
+            'vehicle_client': ['Make/Model/Year/VIN', 'Damage photos (all angles)', 'Repair estimates', 'Pre-accident valuation'],
+            'medical': ['ER records', 'Ambulance report', 'Neck X-ray/CT', 'Doctor diagnosis', 'Track follow-ups'],
+            'scene': ['Skid marks', 'Traffic signals', 'Signs', 'Road/weather', 'Surveillance cams']
+        }
+        return result('Car Accident / Auto Collision', 'Auto Accident', 'High', 'High', key_facts, suggested_actions, checklists)
+
+    # Scenario 3: Employment Law - Age Discrimination
+    if ('discrimination' in t or 'harassment' in t or 'pushed out' in t) and any(k in t for k in ['age', 'older', 'retire']):
+        key_facts = {
+            'employer': 'TechCorp' if 'techcorp' in t else None,
+            'age': '58' if '58' in t else None,
+            'manager': 'New manager 6 months ago' if '6 months' in t and 'manager' in t else None,
+            'performance_review': 'Recent negative review' if 'performance review' in t or 'bad review' in t else None,
+        }
+        suggested_actions = [
+            'Send litigation hold to employer (HR & Legal)',
+            'Collect job title, salary/benefits, manager & HR contacts, reviews, messages',
+            'Request complete personnel file',
+            'Prepare EEOC charge; set 180/300 day deadline',
+            'Comparator analysis questionnaire'
+        ]
+        checklists = {
+            'evidence_direct': ['Emails with age-related comments', 'Texts', 'Witness statements'],
+            'evidence_circumstantial': ['Compare to younger employees', 'Duty changes', 'Review pattern shifts', 'Stat data'],
+            'files': ['Personnel file', 'All reviews', 'Discipline actions', 'Promotions/raises', 'Job descriptions']
+        }
+        return result('Employment Law - Age Discrimination', 'Employment Law', 'Medium-High', 'Medium-High', key_facts, suggested_actions, checklists)
+
+    # Scenario 4: Medical Malpractice
+    if any(k in t for k in ['sponge', 'retained foreign', 'left inside']) and any(k in t for k in ['surgery', 'surgeon']):
+        key_facts = {
+            'procedure': 'Gallbladder removal' if 'gallbladder' in t else 'Surgery',
+            'hospital': 'City Hospital' if 'city hospital' in t else None,
+            'surgeon': 'Dr. Roberts' if 'dr. roberts' in t else None,
+            'complication': 'Retained sponge',
+            'second_surgery': True if 'second surgery' in t or 'another surgery' in t else None,
+            'missed_work': True if 'missed work' in t else None,
+        }
+        suggested_actions = [
+            'Immediate full medical records requests (both hospitals) with HIPAA',
+            'Litigation hold to hospital (Risk & Legal)',
+            'Identify full surgical team',
+            'Retain expert witness (general surgeon) for merit review',
+            'Set SOL & discovery-rule deadlines'
+        ]
+        checklists = {
+            'records_city_hospital': ['Pre-op', 'Operative report', 'Anesthesia', 'Nursing notes', 'Post-op', 'Follow-ups', 'Imaging', 'Labs', 'ER records', 'Communications'],
+            'records_other_hospital': ['Admission/ER', 'Sponge removal surgery report', 'Imaging proving sponge', 'Pathology'],
+            'policies': ['Sponge count procedures', 'OR logs', 'Credentialing for surgeon', 'Incident/peer review (if applicable)']
+        }
+        return result('Medical Malpractice', 'Medical Malpractice', 'High', 'High', key_facts, suggested_actions, checklists)
+
+    # Fallback
+    return {
+        'category': 'other',
+        'department': 'General',
+        'priority': 'Medium',
+        'urgency': 'Medium',
+        'key_facts': {},
+        'dates': dates,
+        'suggested_actions': ['Review case details', 'Schedule client meeting'],
+        'checklists': {}
     }
 
