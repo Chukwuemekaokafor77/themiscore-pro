@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Email Drafts - LegalIntake Pro{% endblock %}
+{% block page_title %}Email Drafts{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>All Draft Emails</span>
+  </div>
+  <div class="list-group list-group-flush">
+    {% for d in drafts %}
+      <a href="{{ url_for('email_draft_detail', draft_id=d.id) }}" class="list-group-item list-group-item-action">
+        <div class="d-flex w-100 justify-content-between">
+          <h6 class="mb-1">{{ d.subject }}</h6>
+          <span class="badge bg-{{ 'success' if d.status=='sent' else 'secondary' }}">{{ d.status|title }}</span>
+        </div>
+        <small class="text-muted">{{ d.created_at.strftime('%b %d, %Y %H:%M') if d.created_at else '' }}{% if d.case_id %} • Case #{{ d.case_id }}{% endif %}</small>
+      </a>
+    {% else %}
+      <div class="list-group-item">
+        <p class="mb-0 text-muted text-center">No email drafts.</p>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

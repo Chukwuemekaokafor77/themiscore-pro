@@ -12,16 +12,18 @@ import mimetypes
 # Support both package and script imports
 try:
     # Package-relative imports (when FLASK_APP=law_firm_intake.app)
-    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline
+    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft
     from .utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from .filters import time_ago, format_date, format_currency, pluralize
     from .services.stt import STTService
+    from .services.letter_templates import LetterTemplateService
 except ImportError:  # pragma: no cover
     # Fallback for running as a script (python app.py)
-    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline
+    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft
     from utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from filters import time_ago, format_date, format_currency, pluralize
     from services.stt import STTService
+    from services.letter_templates import LetterTemplateService
 
 # Load environment variables
 load_dotenv()
@@ -393,7 +395,8 @@ def view_case(case_id):
         abort(404, description="Case not found")
     documents = db.session.query(Document).filter_by(case_id=case_id).all()
     deadlines = Deadline.query.filter_by(case_id=case_id).order_by(Deadline.due_date.asc()).all()
-    return render_template('view_case.html', case=case, documents=documents, deadlines=deadlines)
+    transcripts = Transcript.query.filter_by(case_id=case_id).order_by(Transcript.created_at.desc()).all()
+    return render_template('view_case.html', case=case, documents=documents, deadlines=deadlines, transcripts=transcripts)
 
 @app.route('/cases/<int:case_id>/notes', methods=['POST'])
 @login_required
@@ -582,101 +585,60 @@ def _write_document(case_id, filename, content, uploaded_by_id):
     db.session.add(doc)
     return doc
 
-def _format_letter(header, body):
-    return f"{header}\n\n{body}\n\n{LAW_FIRM_NAME}\n{LAW_FIRM_CONTACT}\n"
-
-def _slip_fall_letter(date_str, time_str, address_placeholder='[ADDRESS]'):
-    header = f"To: Walmart Legal Department / Store Manager\nSubject: Evidence Preservation Notice - Incident on {date_str}"
-    body = (
-        f"Dear Sir/Madam,\n\n"
-        f"Our client was injured at your store location at {address_placeholder} on {date_str} at approximately {time_str}.\n\n"
-        "This letter serves as formal notice to preserve all evidence including:\n"
-        "- Security camera footage from {date} between {time-2h} and {time+2h}\n"
-        "- All footage showing the produce section and surrounding areas\n"
-        "- Incident reports filed that day\n"
-        "- Employee shift schedules and staff list on duty\n"
-        "- Maintenance and cleaning logs for that day\n"
-        "- Any customer complaints about wet floors that day\n\n"
-        "Failure to preserve this evidence may result in legal sanctions.\n\n"
-        "Please confirm receipt within 48 hours."
-    )
-    return _format_letter(header, body)
-
-def _slip_fall_medical_checklist(client_name='[CLIENT]'):
-    header = f"Subject: Medical Records Checklist - {client_name}"
-    body = (
-        "Please obtain and organize the following records:\n"
-        "- Emergency room records from incident date\n"
-        "- Imaging (X-rays, CT, MRI) and radiology reports\n"
-        "- Doctor's notes and diagnosis\n"
-        "- Prescription records\n"
-        "- Physical therapy records (if any)\n"
-        "- Follow-up appointment notes\n"
-    )
-    return _format_letter(header, body)
-
-def _slip_fall_timeline(analysis, client_name='[CLIENT]'):
-    now_str = datetime.utcnow().strftime('%Y-%m-%d')
-    lines = [
-        f"Timeline for {client_name}",
-        "",
-        f"Generated: {now_str}",
-        "",
-        "Incident Date: [DATE]",
-        "Incident Time: [TIME]",
-        "Hospital Visit: [DATE/TIME]",
-        "Follow-up Appointments: [DATES]",
-        "Statute Deadline: [CALCULATE BASED ON STATE]",
-        "",
-        "Notes:",
-        (analysis.get('summary') or 'N/A') if isinstance(analysis, dict) else 'N/A'
-    ]
-    return "\n".join(lines)
-
 def _auto_letters(category, analysis, client_name='[CLIENT]'):
-    # Returns list of (filename, content)
-    now_str = datetime.utcnow().strftime('%Y-%m-%d')
-    time_guess = 'approximately [TIME]'
-    letters = []
+    """Generate comprehensive letters using LetterTemplateService"""
+    # Extract dates from analysis
+    dates_info = analysis.get('dates', [])
+    incident_date = datetime.utcnow().strftime('%Y-%m-%d')
+    incident_time = '[TIME]'
+    
+    # Try to extract date and time from dates list
+    if isinstance(dates_info, list) and dates_info:
+        # Use first date found
+        incident_date = dates_info[0] if dates_info[0] else incident_date
+    
+    # Extract key facts
+    key_facts = analysis.get('key_facts', {})
+    
+    # Determine scenario type and generate letters
     if category.startswith('Personal Injury'):
-        letters.append((f"preservation_walmart_{now_str}.txt", _slip_fall_letter(now_str, time_guess)))
-        letters.append((f"medical_checklist_{now_str}.txt", _slip_fall_medical_checklist(client_name)))
-        letters.append((f"timeline_incident_{now_str}.txt", _slip_fall_timeline(analysis, client_name)))
+        return LetterTemplateService.generate_all_letters_for_scenario(
+            'slip_fall',
+            client_name=client_name,
+            incident_date=incident_date,
+            incident_time=incident_time,
+            analysis_summary=analysis.get('summary', '')
+        )
     elif category.startswith('Car Accident'):
-        header = f"Subject: Request for Accident Report - {now_str}"
-        body = (
-            f"Dear [Police Department],\n\nPlease provide a copy of the traffic collision report for an accident on {now_str}.\n"
-            f"Our client {client_name} was involved.\n\nPlease also preserve:\n"
-            "- Police dash cam footage\n- 911 call recordings\n- Witness statements\n- Traffic camera footage\n\nPlease send to: [EMAIL] or [FAX]"
+        insurance = key_facts.get('other_insurance', '[INSURANCE COMPANY]')
+        location = key_facts.get('location', '[LOCATION]')
+        return LetterTemplateService.generate_all_letters_for_scenario(
+            'car_accident',
+            client_name=client_name,
+            accident_date=incident_date,
+            location=location,
+            insurance_company=insurance
         )
-        letters.append((f"police_report_request_{now_str}.txt", _format_letter(header, body)))
-        header2 = f"Subject: Traffic/Red-Light Camera Footage Request - {now_str}"
-        body2 = "To: Department of Transportation\n\nRequest traffic/red-light camera footage for a 30-minute window around the incident."
-        letters.append((f"dot_camera_request_{now_str}.txt", _format_letter(header2, body2)))
-        header3 = f"Subject: Letter of Representation - {client_name}"
-        body3 = (
-            f"Please be advised our firm represents {client_name}.\nAll communication must go through the firm."
-        )
-        letters.append((f"letter_of_rep_{now_str}.txt", _format_letter(header3, body3)))
     elif category.startswith('Employment Law'):
-        header = "Subject: Evidence Preservation Notice - Employment Matter"
-        body = (
-            "To: Employer HR and Legal Departments\n\nOur client has retained our firm regarding potential employment claims.\n"
-            "You must immediately preserve all documents and electronic records including emails, messages, reviews, and personnel records."
+        employer = key_facts.get('employer', '[EMPLOYER NAME]')
+        return LetterTemplateService.generate_all_letters_for_scenario(
+            'employment',
+            client_name=client_name,
+            employer_name=employer
         )
-        letters.append((f"employment_lit_hold_{now_str}.txt", _format_letter(header, body)))
     elif category.startswith('Medical Malpractice'):
-        header = "Subject: Authorization to Release Medical Records - URGENT"
-        body = (
-            "To: Medical Records Department\n\nOur client authorizes release of ALL relevant medical records, including operative and post-operative notes, imaging, labs, and follow-ups.\nRUSH REQUEST."
+        hospital = key_facts.get('hospital', '[HOSPITAL NAME]')
+        surgeon = key_facts.get('surgeon', '[SURGEON NAME]')
+        procedure = key_facts.get('procedure', '[PROCEDURE TYPE]')
+        return LetterTemplateService.generate_all_letters_for_scenario(
+            'medical_malpractice',
+            client_name=client_name,
+            hospital_name=hospital,
+            procedure_date=incident_date,
+            surgeon_name=surgeon,
+            procedure_type=procedure
         )
-        letters.append((f"medical_records_request_{now_str}.txt", _format_letter(header, body)))
-        header2 = "Subject: LITIGATION HOLD - Evidence Preservation Required"
-        body2 = (
-            "To: Hospital Risk Management and Legal\n\nPreserve complete chart, OR logs, sponge count sheets, credentialing, incident reports, policies, and internal communications."
-        )
-        letters.append((f"hospital_lit_hold_{now_str}.txt", _format_letter(header2, body2)))
-    return letters
+    return []
 
 @app.route('/api/intake/auto', methods=['POST'])
 @login_required
@@ -810,32 +772,196 @@ def auto_intake():
         # Create draft letters as documents (no email sent in dev)
         letters = _auto_letters(analysis.get('category') or '', analysis, client_name=f"{db_client.first_name} {db_client.last_name}")
         created_docs = []
+        email_drafts_created = []
         for fname, content in letters:
             doc = _write_document(new_case.id, fname, content, uploaded_by_id=current_user.id)
             created_docs.append(doc.id)
-
-        # Deadlines: Slip/Fall evidence retention
-        if (analysis.get('category') or '').startswith('Personal Injury'):
-            # Use analysis incident date if available; else today
-            incident_date = None
-            if isinstance(analysis.get('dates'), dict):
-                incident_date = analysis['dates'].get('incident_date')
-            base = datetime.utcnow()
+            # Create a draft email per document (dev-only)
             try:
-                # attempt to parse 'YYYY-MM-DD'
-                if incident_date:
-                    base = datetime.strptime(incident_date, '%Y-%m-%d')
+                draft = EmailDraft(
+                    case_id=new_case.id,
+                    to=None,
+                    subject=f"Draft: {fname.replace('_', ' ').title()}",
+                    body=f"Please review attached draft document: {fname}",
+                    attachments=str(doc.id),
+                    status='draft'
+                )
+                db.session.add(draft)
+                db.session.flush()
+                email_drafts_created.append(draft.id)
             except Exception:
+                db.session.rollback()
+
+        # Comprehensive Deadline Creation
+        category = analysis.get('category', '')
+        base_date = datetime.utcnow()
+        
+        # Try to extract incident date from analysis
+        dates_list = analysis.get('dates', [])
+        if isinstance(dates_list, list) and dates_list:
+            try:
+                # Try to parse first date
+                base_date = datetime.strptime(dates_list[0], '%Y-%m-%d')
+            except:
                 pass
-            evidence_deadline = base + timedelta(days=EVIDENCE_RETENTION_DAYS)
-            dl = Deadline(
+        
+        # Personal Injury / Slip and Fall Deadlines
+        if category.startswith('Personal Injury'):
+            # Evidence preservation - URGENT
+            evidence_deadline = base_date + timedelta(days=EVIDENCE_RETENTION_DAYS)
+            db.session.add(Deadline(
                 case_id=new_case.id,
-                name='Footage likely overwritten by',
+                name='Security Footage Retention Deadline',
                 due_date=evidence_deadline,
                 source='slip_fall_evidence',
-                notes=f'Assumed retention window {EVIDENCE_RETENTION_DAYS} days.'
-            )
-            db.session.add(dl)
+                notes=f'Security footage typically deleted after {EVIDENCE_RETENTION_DAYS} days. URGENT: Send preservation letter immediately.'
+            ))
+            
+            # Statute of limitations (typically 2-3 years, using 2 years)
+            statute_deadline = base_date + timedelta(days=730)  # 2 years
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Statute of Limitations',
+                due_date=statute_deadline,
+                source='statute_of_limitations',
+                notes='Must file lawsuit before this date. Verify state-specific statute.'
+            ))
+            
+            # Medical records collection
+            medical_deadline = datetime.utcnow() + timedelta(days=14)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Medical Records Collection',
+                due_date=medical_deadline,
+                source='medical_records',
+                notes='Obtain all medical records within 14 days.'
+            ))
+        
+        # Car Accident Deadlines
+        elif category.startswith('Car Accident'):
+            # Police report request
+            police_deadline = datetime.utcnow() + timedelta(days=7)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Police Report Request',
+                due_date=police_deadline,
+                source='police_report',
+                notes='Request police report and dash cam footage within 7 days.'
+            ))
+            
+            # Traffic camera footage
+            camera_deadline = datetime.utcnow() + timedelta(days=30)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Traffic Camera Footage Deadline',
+                due_date=camera_deadline,
+                source='traffic_camera',
+                notes='Traffic camera footage typically retained 30-90 days. Request immediately.'
+            ))
+            
+            # Medical evaluation
+            medical_eval_deadline = datetime.utcnow() + timedelta(days=2)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Medical Evaluation',
+                due_date=medical_eval_deadline,
+                source='medical_evaluation',
+                notes='Schedule medical evaluation within 48 hours of accident.'
+            ))
+            
+            # Statute of limitations
+            statute_deadline = base_date + timedelta(days=730)  # 2 years typical
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Statute of Limitations',
+                due_date=statute_deadline,
+                source='statute_of_limitations',
+                notes='Must file lawsuit before this date. Verify state-specific statute.'
+            ))
+        
+        # Employment Law Deadlines
+        elif category.startswith('Employment Law'):
+            # EEOC filing deadline (180 days federal, 300 days in deferral states)
+            eeoc_deadline = base_date + timedelta(days=180)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='EEOC Filing Deadline (Federal)',
+                due_date=eeoc_deadline,
+                source='eeoc_filing',
+                notes='Must file EEOC charge within 180 days (300 days in deferral states). CRITICAL DEADLINE.'
+            ))
+            
+            # Evidence preservation
+            evidence_deadline = datetime.utcnow() + timedelta(days=7)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Send Litigation Hold Letter',
+                due_date=evidence_deadline,
+                source='employment_evidence',
+                notes='Send litigation hold to employer immediately. Emails may be deleted.'
+            ))
+            
+            # Personnel file request
+            personnel_deadline = datetime.utcnow() + timedelta(days=14)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Personnel File Request',
+                due_date=personnel_deadline,
+                source='personnel_file',
+                notes='Request complete personnel file within 14 days.'
+            ))
+        
+        # Medical Malpractice Deadlines
+        elif category.startswith('Medical Malpractice'):
+            # Medical records - URGENT
+            records_deadline = datetime.utcnow() + timedelta(days=7)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Medical Records Request (URGENT)',
+                due_date=records_deadline,
+                source='medical_records',
+                notes='Request all medical records immediately. Include operative reports, count sheets, imaging.'
+            ))
+            
+            # Expert witness retention
+            expert_deadline = datetime.utcnow() + timedelta(days=30)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Retain Medical Expert Witness',
+                due_date=expert_deadline,
+                source='expert_witness',
+                notes='Retain medical expert for case review and Certificate of Merit.'
+            ))
+            
+            # Certificate of Merit (typically 60-90 days after filing)
+            merit_deadline = datetime.utcnow() + timedelta(days=60)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Certificate of Merit',
+                due_date=merit_deadline,
+                source='certificate_of_merit',
+                notes='Many states require Certificate of Merit within 60-90 days of filing. Verify state requirements.'
+            ))
+            
+            # Statute of limitations (typically 1-2 years for med mal, using 2 years)
+            statute_deadline = base_date + timedelta(days=730)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Statute of Limitations',
+                due_date=statute_deadline,
+                source='statute_of_limitations',
+                notes='Medical malpractice has SHORT statute. May be 1-2 years. Verify state law and discovery rule.'
+            ))
+            
+            # Discovery rule alternative (from date sponge was discovered)
+            discovery_deadline = datetime.utcnow() + timedelta(days=365)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Discovery Rule Deadline',
+                due_date=discovery_deadline,
+                source='discovery_rule',
+                notes='Alternative statute from date of discovery. Verify which date applies in your state.'
+            ))
 
         db.session.commit()
 
@@ -854,12 +980,12 @@ def auto_intake():
             'case_id': new_case.id,
             'actions_created': created_actions,
             'documents_created': created_docs,
+            'email_drafts_created': email_drafts_created,
             'analysis': analysis
         }), 201
     except Exception as e:
         db.session.rollback()
         app.logger.error(f"Error in auto_intake: {str(e)}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/documents/<int:document_id>')
 @login_required
@@ -1245,7 +1371,70 @@ def add_client():
             db.session.rollback()
             flash(f'Error adding client: {str(e)}', 'error')
     
-    return render_template('add_client.html')        
+    return render_template('add_client.html')
+
+# Email Drafts Routes
+@app.route('/email/drafts')
+@login_required
+@requires_auth
+def email_drafts():
+    """View all email drafts"""
+    drafts = EmailDraft.query.order_by(EmailDraft.created_at.desc()).all()
+    return render_template('email_drafts.html', drafts=drafts)
+
+@app.route('/email/drafts/<int:draft_id>')
+@login_required
+@requires_auth
+def view_email_draft(draft_id):
+    """View a specific email draft"""
+    draft = db.session.get(EmailDraft, draft_id)
+    if draft is None:
+        abort(404, description="Email draft not found")
+    return render_template('email_draft_detail.html', draft=draft)
+
+@app.route('/email/drafts/<int:draft_id>/send', methods=['POST'])
+@login_required
+@requires_auth
+def send_email_draft(draft_id):
+    """Mark an email draft as sent (actual sending would require SMTP configuration)"""
+    draft = db.session.get(EmailDraft, draft_id)
+    if draft is None:
+        abort(404, description="Email draft not found")
+    
+    try:
+        # In production, this would actually send the email via SMTP/SendGrid
+        # For now, we just mark it as sent
+        draft.status = 'sent'
+        draft.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        flash('Email marked as sent. (Note: Actual email sending requires SMTP configuration)', 'success')
+        return redirect(url_for('email_drafts'))
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error sending email draft: {str(e)}')
+        flash('Error sending email', 'error')
+        return redirect(url_for('view_email_draft', draft_id=draft_id))
+
+@app.route('/email/drafts/<int:draft_id>/delete', methods=['POST'])
+@login_required
+@requires_auth
+def delete_email_draft(draft_id):
+    """Delete an email draft"""
+    draft = db.session.get(EmailDraft, draft_id)
+    if draft is None:
+        abort(404, description="Email draft not found")
+    
+    try:
+        db.session.delete(draft)
+        db.session.commit()
+        flash('Email draft deleted successfully', 'success')
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f'Error deleting email draft: {str(e)}')
+        flash('Error deleting email draft', 'error')
+    
+    return redirect(url_for('email_drafts'))
 
 # Add more API endpoints for clients, actions, and other resources...
 

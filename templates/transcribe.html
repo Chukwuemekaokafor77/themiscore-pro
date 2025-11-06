@@ -652,4 +652,104 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 </script>
+
+<!-- Create Case Modal -->
+<div class="modal fade" id="createCaseModal" tabindex="-1" aria-labelledby="createCaseModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title" id="createCaseModalLabel">
+                    <i class="bi bi-folder-plus me-2"></i>Create Case from Transcript
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="createCaseForm">
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle me-2"></i>
+                        The AI will analyze the transcript and automatically create actions, documents, and deadlines based on the case type.
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="caseTitleInput" class="form-label">
+                            <i class="bi bi-card-heading me-1"></i>Case Title <span class="text-danger">*</span>
+                        </label>
+                        <input type="text" class="form-control" id="caseTitleInput" 
+                               placeholder="e.g., Walmart Slip and Fall - John Smith" required>
+                        <div class="form-text">Give this case a descriptive title</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="caseDescriptionInput" class="form-label">
+                            <i class="bi bi-file-text me-1"></i>Case Description <span class="text-danger">*</span>
+                        </label>
+                        <textarea class="form-control" id="caseDescriptionInput" rows="6" required
+                                  placeholder="The transcript will be automatically filled here..."></textarea>
+                        <div class="form-text">This text will be analyzed by AI to determine case type and generate actions</div>
+                    </div>
+                    
+                    <hr>
+                    
+                    <h6 class="mb-3"><i class="bi bi-person me-2"></i>Client Information</h6>
+                    
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="clientFirstName" class="form-label">
+                                First Name <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="clientFirstName" 
+                                   placeholder="John" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="clientLastName" class="form-label">
+                                Last Name <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="clientLastName" 
+                                   placeholder="Smith" required>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="clientEmail" class="form-label">
+                                <i class="bi bi-envelope me-1"></i>Email
+                            </label>
+                            <input type="email" class="form-control" id="clientEmail" 
+                                   placeholder="john.smith@example.com">
+                            <div class="form-text">Used to match existing clients</div>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="clientPhone" class="form-label">
+                                <i class="bi bi-telephone me-1"></i>Phone
+                            </label>
+                            <input type="tel" class="form-control" id="clientPhone" 
+                                   placeholder="555-1234">
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="clientAddress" class="form-label">
+                            <i class="bi bi-geo-alt me-1"></i>Address
+                        </label>
+                        <input type="text" class="form-control" id="clientAddress" 
+                               placeholder="123 Main St, Anytown, ST 12345">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                        <i class="bi bi-x-circle me-1"></i>Cancel
+                    </button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-magic me-1"></i>Create Case with AI Analysis
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Load JavaScript modules -->
+<script src="{{ url_for('static', filename='js/transcribe.js') }}"></script>
+<script src="{{ url_for('static', filename='js/case-creation.js') }}"></script>
+
 {% endblock %}

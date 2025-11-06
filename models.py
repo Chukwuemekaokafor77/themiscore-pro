@@ -44,6 +44,36 @@ class User(db.Model):
         }
 
 
+class EmailDraft(db.Model):
+    """Draft emails stored for review/sending (dev-only)."""
+    __tablename__ = 'email_draft'
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=True)
+    to = db.Column(db.String(255), nullable=True)
+    subject = db.Column(db.String(255), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    attachments = db.Column(db.Text, nullable=True)  # comma-separated document IDs or paths
+    status = db.Column(db.String(20), default='draft')  # draft|sent
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    case = db.relationship('Case', backref=db.backref('email_drafts', lazy=True, cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'to': self.to,
+            'subject': self.subject,
+            'body': self.body,
+            'attachments': self.attachments,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Deadline(db.Model):
     """Deadline tracking for cases (e.g., statutes, evidence retention, EEOC)."""
     __tablename__ = 'deadline'
