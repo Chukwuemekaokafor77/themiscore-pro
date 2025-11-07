@@ -36,11 +36,19 @@ class AssemblyAIProvider(STTProvider):
                 yield data
 
     def upload_and_transcribe(self, file_path: str) -> str:
-        # upload
-        up = requests.post(ASSEMBLYAI_UPLOAD_URL, headers=self.headers_upload, data=self._read_file(file_path))
-        up.raise_for_status()
-        upload_url = up.json()['upload_url']
-        # request transcript
+        # upload with retries
+        last_err = None
+        for attempt in range(3):
+            try:
+                up = requests.post(ASSEMBLYAI_UPLOAD_URL, headers=self.headers_upload, data=self._read_file(file_path), timeout=30)
+                up.raise_for_status()
+                upload_url = up.json()['upload_url']
+                break
+            except Exception as e:
+                last_err = e
+                if attempt == 2:
+                    raise
+        # request transcript with retries
         payload = {
             'audio_url': upload_url,
             'speaker_labels': True,
@@ -49,14 +57,28 @@ class AssemblyAIProvider(STTProvider):
             'iab_categories': True,
             'auto_highlights': True
         }
-        tr = requests.post(ASSEMBLYAI_TRANSCRIPTION_URL, json=payload, headers=self.headers_json)
-        tr.raise_for_status()
-        return tr.json()['id']
+        for attempt in range(3):
+            try:
+                tr = requests.post(ASSEMBLYAI_TRANSCRIPTION_URL, json=payload, headers=self.headers_json, timeout=30)
+                tr.raise_for_status()
+                return tr.json()['id']
+            except Exception as e:
+                last_err = e
+                if attempt == 2:
+                    raise
 
     def get_status(self, external_id: str) -> Dict[str, Any]:
-        r = requests.get(f"{ASSEMBLYAI_TRANSCRIPTION_URL}/{external_id}", headers=self.headers_json)
-        r.raise_for_status()
-        data = r.json()
+        # status polling with retries
+        for attempt in range(3):
+            try:
+                r = requests.get(f"{ASSEMBLYAI_TRANSCRIPTION_URL}/{external_id}", headers=self.headers_json, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                continue
         resp = {
             'status': data.get('status'),
             'id': data.get('id'),

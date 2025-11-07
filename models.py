@@ -45,6 +45,127 @@ class User(db.Model):
         }
 
 
+class Intent(db.Model):
+    """Configurable intent representing a high-level case category."""
+    __tablename__ = 'intent'
+
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(100), unique=True, nullable=False)  # e.g., 'personal_injury_premises'
+    name = db.Column(db.String(200), nullable=False)  # e.g., 'Personal Injury - Premises Liability'
+    department = db.Column(db.String(100), nullable=True)
+    priority_default = db.Column(db.String(20), default='medium')
+    active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    action_templates = db.relationship('ActionTemplate', back_populates='intent', cascade='all, delete-orphan')
+    email_templates = db.relationship('EmailTemplate', back_populates='intent', cascade='all, delete-orphan')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'key': self.key,
+            'name': self.name,
+            'department': self.department,
+            'priority_default': self.priority_default,
+            'active': self.active,
+        }
+
+
+class IntentRule(db.Model):
+    """Optional matching rule for an intent (simple pattern or JSON rule)."""
+    __tablename__ = 'intent_rule'
+
+    id = db.Column(db.Integer, primary_key=True)
+    intent_id = db.Column(db.Integer, db.ForeignKey('intent.id'), nullable=False)
+    pattern = db.Column(db.Text, nullable=False)  # free-form string or JSON describing match
+    weight = db.Column(db.Float, default=1.0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    intent = db.relationship('Intent', backref=db.backref('rules', lazy=True, cascade='all, delete-orphan'))
+
+
+class ActionTemplate(db.Model):
+    """Template for actions to generate for an intent."""
+    __tablename__ = 'action_template'
+
+    id = db.Column(db.Integer, primary_key=True)
+    intent_id = db.Column(db.Integer, db.ForeignKey('intent.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    default_status = db.Column(db.String(50), default='pending')
+    default_priority = db.Column(db.String(20), default='medium')
+    due_in_days = db.Column(db.Integer, nullable=True)  # relative due date
+
+    intent = db.relationship('Intent', back_populates='action_templates')
+
+
+class EmailTemplate(db.Model):
+    """Template for emails/letters to generate for an intent."""
+    __tablename__ = 'email_template'
+
+    id = db.Column(db.Integer, primary_key=True)
+    intent_id = db.Column(db.Integer, db.ForeignKey('intent.id'), nullable=False)
+    filename = db.Column(db.String(200), nullable=False)
+    subject = db.Column(db.String(255), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+
+    intent = db.relationship('Intent', back_populates='email_templates')
+
+
+class AnalyzerLog(db.Model):
+    """Metrics/logs for analyzer calls (AAI or rule-based)."""
+    __tablename__ = 'analyzer_log'
+
+    id = db.Column(db.Integer, primary_key=True)
+    provider = db.Column(db.String(50), nullable=False)  # 'aai' | 'rules'
+    model = db.Column(db.String(100), nullable=True)
+    latency_ms = db.Column(db.Integer, nullable=True)
+    input_tokens = db.Column(db.Integer, nullable=True)
+    output_tokens = db.Column(db.Integer, nullable=True)
+    succeeded = db.Column(db.Boolean, default=True)
+    error = db.Column(db.Text, nullable=True)
+    text_chars = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=True)
+
+
+class EmailQueue(db.Model):
+    """Queue for scheduled outbound emails (e.g., preservation letters)."""
+    __tablename__ = 'email_queue'
+
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=True)
+    draft_id = db.Column(db.Integer, db.ForeignKey('email_draft.id'), nullable=True)
+    to = db.Column(db.String(255), nullable=True)
+    subject = db.Column(db.String(255), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    send_after = db.Column(db.DateTime, nullable=False)
+    status = db.Column(db.String(20), default='pending')  # pending|sent|failed
+    attempts = db.Column(db.Integer, default=0)
+    last_error = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    case = db.relationship('Case', backref=db.backref('email_queue', lazy=True))
+    draft = db.relationship('EmailDraft', backref=db.backref('queue_item', uselist=False))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'draft_id': self.draft_id,
+            'to': self.to,
+            'subject': self.subject,
+            'send_after': self.send_after.isoformat() if self.send_after else None,
+            'status': self.status,
+            'attempts': self.attempts,
+            'last_error': self.last_error,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
 class NotificationPreference(db.Model):
     """Reminder/notification preferences per user or client."""
     __tablename__ = 'notification_preference'

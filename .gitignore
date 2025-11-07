@@ -51,3 +51,28 @@ uploads/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Frontend (Next.js)
+node_modules/
+.next/
+.turbo/
+.vercel/
+law_firm_intake_frontend/node_modules/
+law_firm_intake_frontend/.next/
+
+# Python caches and coverage
+.pytest_cache/
+.mypy_cache/
+.pytype/
+htmlcov/
+.coverage
+.coverage.*
+
+# Build artifacts
+pip-wheel-metadata/
+
+# Env files (backend and frontend)
+.env.*
+.env.local
+.env.production.local
+.python-version

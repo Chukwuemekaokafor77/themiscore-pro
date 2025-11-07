@@ -18,15 +18,17 @@ import ssl
 # Support both package and script imports
 try:
     # Package-relative imports (when FLASK_APP=law_firm_intake.app)
-    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft, ClientUser, ClientMessage, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, BillingRate, CalendarEvent, NotificationPreference
+    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog
     from .utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
+    from .services.analyzer_assemblyai import analyze_with_aai
     from .filters import time_ago, format_date, format_currency, pluralize
     from .services.stt import STTService
     from .services.letter_templates import LetterTemplateService
 except ImportError:  # pragma: no cover
     # Fallback for running as a script (python app.py)
-    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft, ClientUser, ClientMessage, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, BillingRate, CalendarEvent, NotificationPreference
+    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog
     from utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
+    from services.analyzer_assemblyai import analyze_with_aai
     from filters import time_ago, format_date, format_currency, pluralize
     from services.stt import STTService
     from services.letter_templates import LetterTemplateService
@@ -36,6 +38,8 @@ load_dotenv()
 
 # AssemblyAI Configuration
 ASSEMBLYAI_API_KEY = os.getenv('ASSEMBLYAI_API_KEY')
+USE_AAI_ANALYZER = (os.getenv('USE_AAI_ANALYZER', 'false').strip().lower() == 'true')
+LOG_ANALYZER_METRICS = (os.getenv('LOG_ANALYZER_METRICS', 'false').strip().lower() == 'true')
 ASSEMBLYAI_UPLOAD_URL = "https://api.assemblyai.com/v2/upload"
 ASSEMBLYAI_TRANSCRIPTION_URL = "https://api.assemblyai.com/v2/transcript"
 ASSEMBLYAI_HEADERS = {
@@ -81,6 +85,20 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+# Resolve current user id for API writes. Falls back to first user when no session.
+def _current_user_id():
+    try:
+        uid = session.get('user_id')
+    except Exception:
+        uid = None
+    if uid:
+        return uid
+    try:
+        u = User.query.first()
+        return u.id if u else None
+    except Exception:
+        return None
+
 # Load configuration from environment variables
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-change-in-production')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -93,6 +111,7 @@ EVIDENCE_RETENTION_DAYS = int(os.getenv('EVIDENCE_RETENTION_DAYS', 60))
 
 # Allowed file extensions for uploads
 ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'jpeg', 'png', 'gif'}
+ALLOWED_AUDIO_EXTENSIONS = {'webm', 'wav', 'mp3', 'm4a', 'mp4', 'ogg'}
 
 # Initialize extensions
 db.init_app(app)
@@ -164,6 +183,38 @@ def _check_calendar_reminders():
                 current_app.logger.error(f"Reminder job error for event {getattr(ev, 'id', '?')}: {str(e)}")
 
 _scheduler = None
+def _process_email_queue():
+    """Background job to process pending EmailQueue items."""
+    with app.app_context():
+        now = datetime.utcnow()
+        try:
+            items = (
+                db.session.query(EmailQueue)
+                .filter(EmailQueue.status == 'pending')
+                .filter(EmailQueue.send_after <= now)
+                .order_by(EmailQueue.created_at.asc())
+                .limit(25)
+                .all()
+            )
+            for item in items:
+                try:
+                    _send_email(item.to, item.subject, item.body)
+                    item.status = 'sent'
+                    item.attempts = (item.attempts or 0) + 1
+                    item.last_error = None
+                    item.updated_at = now
+                    db.session.add(item)
+                    db.session.commit()
+                except Exception as e:
+                    item.status = 'failed'
+                    item.attempts = (item.attempts or 0) + 1
+                    item.last_error = str(e)
+                    item.updated_at = now
+                    db.session.add(item)
+                    db.session.commit()
+        except Exception as e:
+            current_app.logger.error(f"Email queue processor error: {str(e)}")
+
 def _start_scheduler_once():
     global _scheduler
     if _scheduler is not None:
@@ -173,6 +224,7 @@ def _start_scheduler_once():
         return
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(_check_calendar_reminders, 'interval', minutes=1, id='calendar_reminders')
+    _scheduler.add_job(_process_email_queue, 'interval', minutes=1, id='email_queue_processor')
     _scheduler.start()
 
 # Start scheduler only on the reloader main process
@@ -192,8 +244,38 @@ app.jinja_env.filters['pluralize'] = pluralize
 
 # Import models for Flask-Migrate to detect (already imported above)
 
+# Redirect legacy HTML pages to Next.js
+@app.before_request
+def _redirect_legacy_to_next():
+    try:
+        if request.method != 'GET':
+            return None
+        path = request.path.rstrip('/') or '/'
+        # Do not redirect auth endpoints
+        if path in ('/login', '/logout', '/portal/login'):
+            return None
+        mapping = {
+            '/': 'http://localhost:3000/dashboard',
+            '/dashboard': 'http://localhost:3000/dashboard',
+            '/cases': 'http://localhost:3000/cases',
+            '/clients': 'http://localhost:3000/clients',
+            '/actions': 'http://localhost:3000/actions',
+            '/documents': 'http://localhost:3000/documents',
+            '/calendar': 'http://localhost:3000/calendar',
+            '/billing': 'http://localhost:3000/billing',
+            '/portal/invoices': 'http://localhost:3000/portal/invoices',
+            '/portal/payments': 'http://localhost:3000/portal/payments',
+            '/portal/documents': 'http://localhost:3000/portal/documents',
+        }
+        target = mapping.get(path)
+        if target:
+            return redirect(target, code=301)
+    except Exception:
+        return None
+    return None
+
 # Login manager setup
-from flask_login import LoginManager, login_user, login_required, logout_user, current_user
+from flask_login import LoginManager, login_required, current_user
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -314,6 +396,16 @@ def save_uploaded_file(file):
     file.save(filepath)
     return filepath
 
+def _is_allowed_audio(filename: str, content_type: str) -> bool:
+    if not filename:
+        return False
+    ext = os.path.splitext(filename)[1].lower().lstrip('.')
+    if ext in ALLOWED_AUDIO_EXTENSIONS:
+        return True
+    if content_type and content_type.startswith(('audio/', 'video/')):
+        return True
+    return False
+
 # Routes
 @app.route('/')
 @requires_auth
@@ -325,25 +417,14 @@ def index():
 @app.route('/login', methods=['GET', 'POST'])
 @requires_auth
 def login():
-    if request.method == 'POST':
-        email = request.form.get('email')
-        password = request.form.get('password')
-        
-        user = User.query.filter_by(email=email).first()
-        
-        if user and user.check_password(password):
-            session['user_id'] = user.id
-            session.permanent = True
-            return redirect(url_for('dashboard'))
-        else:
-            flash('Invalid email or password', 'danger')
-    
-    return render_template('login.html')
+    # Decommissioned Flask login UI: delegate to Next.js staff console login
+    return redirect('http://localhost:3000/login', code=301)
 
 @app.route('/logout')
 def logout():
     session.pop('user_id', None)
-    return redirect(url_for('login'))
+    # Redirect to Next.js staff console login
+    return redirect('http://localhost:3000/login', code=302)
 
 @app.route('/dashboard')
 @login_required
@@ -394,9 +475,8 @@ def clients():
 @app.route('/clients/<int:client_id>')
 @login_required
 def view_client(client_id):
-    client = Client.query.get_or_404(client_id)
-    cases = Case.query.filter_by(client_id=client_id).all()
-    return render_template('view_client.html', client=client, cases=cases)
+    # Redirect to Next.js client detail page
+    return redirect(f"http://localhost:3000/clients/{client_id}", code=301)
 
 @app.route('/clients/<int:client_id>/edit', methods=['GET', 'POST'])
 @login_required
@@ -687,6 +767,837 @@ def portal_documents():
     accesses = ClientDocumentAccess.query.filter_by(client_id=client_id).options(db.joinedload(ClientDocumentAccess.document), db.joinedload(ClientDocumentAccess.client)).order_by(ClientDocumentAccess.granted_at.desc()).all()
     return render_template('portal_documents.html', accesses=accesses)
 
+# ---- Client Portal JSON APIs ----
+@app.route('/api/portal/invoices', methods=['GET'])
+@portal_login_required
+def api_portal_invoices():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    invoices = (
+        Invoice.query
+        .options(db.joinedload(Invoice.client), db.joinedload(Invoice.case))
+        .filter(Invoice.client_id == client_id)
+        .order_by(Invoice.created_at.desc())
+        .all()
+    )
+    def inv_to_dict(inv: Invoice):
+        return {
+            'id': inv.id,
+            'invoice_number': getattr(inv, 'invoice_number', None),
+            'status': getattr(inv, 'status', None),
+            'total_amount': float(getattr(inv, 'total_amount', 0) or 0),
+            'balance_due': float(getattr(inv, 'balance_due', 0) or 0),
+            'created_at': inv.created_at.isoformat() if getattr(inv, 'created_at', None) else None,
+            'case': {
+                'id': inv.case.id if getattr(inv, 'case', None) else None,
+                'title': getattr(inv.case, 'title', None) if getattr(inv, 'case', None) else None,
+            },
+        }
+    return jsonify([inv_to_dict(i) for i in invoices])
+
+@app.route('/api/portal/payments', methods=['GET'])
+@portal_login_required
+def api_portal_payments():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    payments = (
+        Payment.query
+        .join(Invoice, Payment.invoice_id == Invoice.id)
+        .filter(Invoice.client_id == client_id)
+        .options(db.joinedload(Payment.invoice))
+        .order_by(Payment.payment_date.desc())
+        .all()
+    )
+    def pay_to_dict(p: Payment):
+        return {
+            'id': p.id,
+            'amount': float(getattr(p, 'amount', 0) or 0),
+            'payment_date': p.payment_date.isoformat() if getattr(p, 'payment_date', None) else None,
+            'payment_method': getattr(p, 'payment_method', None),
+            'status': getattr(p, 'status', None),
+            'reference_number': getattr(p, 'reference_number', None),
+            'invoice': {
+                'id': p.invoice.id if getattr(p, 'invoice', None) else None,
+                'invoice_number': getattr(p.invoice, 'invoice_number', None) if getattr(p, 'invoice', None) else None,
+            },
+        }
+    return jsonify([pay_to_dict(p) for p in payments])
+
+@app.route('/api/portal/documents', methods=['GET'])
+@portal_login_required
+def api_portal_documents():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    accesses = (
+        ClientDocumentAccess.query
+        .filter_by(client_id=client_id)
+        .options(db.joinedload(ClientDocumentAccess.document), db.joinedload(ClientDocumentAccess.client))
+        .order_by(ClientDocumentAccess.granted_at.desc())
+        .all()
+    )
+    def acc_to_dict(a: ClientDocumentAccess):
+        doc = getattr(a, 'document', None)
+        return {
+            'id': a.id,
+            'granted_at': a.granted_at.isoformat() if getattr(a, 'granted_at', None) else None,
+            'document': {
+                'id': doc.id if doc else None,
+                'name': getattr(doc, 'name', None) if doc else None,
+                'file_type': getattr(doc, 'file_type', None) if doc else None,
+                'uploaded_by_id': getattr(doc, 'uploaded_by_id', None) if doc else None,
+                'created_at': doc.created_at.isoformat() if (doc and getattr(doc, 'created_at', None)) else None,
+            }
+        }
+    return jsonify([acc_to_dict(a) for a in accesses])
+
+# ---- Staff JSON APIs ----
+@app.route('/api/session', methods=['GET'])
+def api_session_probe():
+    if session.get('user_id'):
+        return ('', 204)
+    return ('', 401)
+
+@app.route('/api/intake/analyze', methods=['POST'])
+@requires_auth
+def api_intake_analyze():
+    try:
+        data = request.get_json(silent=True) or {}
+        text = str(data.get('text', '')).strip()
+        if not text:
+            return jsonify({'error': 'Missing text'}), 400
+        result = None
+        # Prefer AssemblyAI analyzer if enabled
+        if USE_AAI_ANALYZER and ASSEMBLYAI_API_KEY:
+            try:
+                result = analyze_with_aai(text)
+            except Exception as e:
+                app.logger.error(f"analyze_with_aai failed: {str(e)}; falling back")
+        if result is None:
+            try:
+                result = analyze_intake_text_scenarios(text)
+            except Exception as e:
+                app.logger.error(f"analyze_intake_text_scenarios failed: {str(e)}")
+                return jsonify({'error': 'Analyzer unavailable'}), 501
+        # Normalize response structure
+        payload = {
+            'category': result.get('category'),
+            'urgency': result.get('urgency'),
+            'key_facts': result.get('key_facts', {}),
+            'dates': result.get('dates', {}),
+            'parties': result.get('parties', {}),
+            'suggested_actions': result.get('suggested_actions', []),
+            'checklists': result.get('checklists', {}),
+            'department': result.get('department'),
+            'confidence': result.get('confidence'),
+        }
+        return jsonify(payload)
+    except Exception as e:
+        app.logger.error(f"/api/intake/analyze error: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
+
+@app.route('/api/dashboard', methods=['GET'])
+@requires_auth
+def api_dashboard():
+    try:
+        uid = _current_user_id()
+        user = db.session.get(User, uid) if uid else None
+        stats = {
+            'active_cases': Case.query.filter_by(status='open').count(),
+            'active_clients': Client.query.count(),
+            'pending_actions': Action.query.filter_by(status='pending').count(),
+            'documents_count': Document.query.count(),
+            'last_updated': datetime.now().isoformat()
+        }
+        recent_cases = [
+            {
+                'id': c.id,
+                'title': c.title,
+                'created_at': c.created_at.isoformat() if getattr(c, 'created_at', None) else None,
+                'client': {
+                    'id': c.client.id if getattr(c, 'client', None) else None,
+                    'name': f"{getattr(c.client, 'first_name', '')} {getattr(c.client, 'last_name', '')}".strip() if getattr(c, 'client', None) else None,
+                }
+            }
+            for c in Case.query.order_by(Case.created_at.desc()).limit(5).all()
+        ]
+        now = datetime.now()
+        upcoming_actions = [
+            {
+                'id': a.id,
+                'title': a.title,
+                'due_date': a.due_date.isoformat() if getattr(a, 'due_date', None) else None,
+                'status': a.status,
+            }
+            for a in Action.query.filter(Action.due_date >= now).order_by(Action.due_date.asc()).limit(5).all()
+        ]
+        upcoming_deadlines = [
+            {
+                'id': d.id,
+                'name': d.name,
+                'due_date': d.due_date.isoformat() if getattr(d, 'due_date', None) else None,
+            }
+            for d in Deadline.query.filter(Deadline.due_date >= now, Deadline.due_date <= now + timedelta(days=30)).order_by(Deadline.due_date.asc()).limit(5).all()
+        ]
+        return jsonify({
+            'current_user': {'id': user.id, 'email': user.email} if user else None,
+            'stats': stats,
+            'recent_cases': recent_cases,
+            'upcoming_actions': upcoming_actions,
+            'upcoming_deadlines': upcoming_deadlines,
+        })
+    except Exception as e:
+        app.logger.error(f"Error in api_dashboard: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/cases/<int:case_id>/notes', methods=['POST'])
+@requires_auth
+def api_case_add_note(case_id):
+    try:
+        c = db.session.get(Case, case_id)
+        if c is None:
+            abort(404)
+        data = request.get_json() or {}
+        content = (data.get('note') or '').strip()
+        if not content:
+            return jsonify({'error': 'note required'}), 400
+        note = CaseNote(
+            content=content,
+            is_private=False,
+            case_id=c.id,
+            created_by_id=_current_user_id()
+        )
+        db.session.add(note)
+        db.session.commit()
+        return jsonify({'ok': True, 'id': note.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_case_add_note: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/cases/<int:case_id>', methods=['GET'])
+@requires_auth
+def api_case_detail(case_id):
+    try:
+        c = db.session.get(Case, case_id)
+        if c is None:
+            abort(404)
+        result = {
+            'id': c.id,
+            'title': c.title,
+            'description': getattr(c, 'description', None),
+            'status': c.status,
+            'priority': getattr(c, 'priority', None),
+            'created_at': c.created_at.isoformat() if getattr(c, 'created_at', None) else None,
+            'client': {
+                'id': c.client.id if getattr(c, 'client', None) else None,
+                'first_name': getattr(c.client, 'first_name', None) if getattr(c, 'client', None) else None,
+                'last_name': getattr(c.client, 'last_name', None) if getattr(c, 'client', None) else None,
+                'email': getattr(c.client, 'email', None) if getattr(c, 'client', None) else None,
+            } if getattr(c, 'client', None) else None,
+        }
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error(f"Error in api_case_detail: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/cases', methods=['GET'])
+@requires_auth
+def api_cases_list():
+    try:
+        pagination = get_pagination(request.args.get('page'), request.args.get('per_page', 10))
+        query = Case.query.options(db.joinedload(Case.client))
+        query = apply_case_filters(query, request.args)
+        sort_column, sort_order = get_sort_params(request.args)
+        if sort_column is not None:
+            query = query.order_by(db.desc(sort_column) if sort_order == 'desc' else sort_column)
+        else:
+            query = query.order_by(Case.created_at.desc())
+        paginated = query.paginate(page=pagination['page'], per_page=pagination['per_page'], error_out=False)
+        items = [
+            {
+                'id': c.id,
+                'title': c.title,
+                'status': c.status,
+                'priority': c.priority,
+                'created_at': c.created_at.isoformat() if getattr(c, 'created_at', None) else None,
+                'client': {
+                    'id': c.client.id if getattr(c, 'client', None) else None,
+                    'first_name': getattr(c.client, 'first_name', None) if getattr(c, 'client', None) else None,
+                    'last_name': getattr(c.client, 'last_name', None) if getattr(c, 'client', None) else None,
+                }
+            }
+            for c in paginated.items
+        ]
+        return jsonify({
+            'items': items,
+            'page': paginated.page,
+            'per_page': paginated.per_page,
+            'total': paginated.total,
+            'pages': paginated.pages
+        })
+    except Exception as e:
+        app.logger.error(f"Error in api_cases_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/clients', methods=['GET'])
+@requires_auth
+def api_clients_list():
+    try:
+        query = Client.query
+        # Optional search by name/email/phone
+        search = (request.args.get('search') or '').strip()
+        if search:
+            like = f"%{search}%"
+            query = query.filter(
+                db.or_(
+                    Client.first_name.ilike(like),
+                    Client.last_name.ilike(like),
+                    Client.email.ilike(like),
+                    Client.phone.ilike(like),
+                )
+            )
+        clients = query.order_by(Client.last_name, Client.first_name).all()
+        items = [
+            {
+                'id': cl.id,
+                'first_name': getattr(cl, 'first_name', None),
+                'last_name': getattr(cl, 'last_name', None),
+                'email': getattr(cl, 'email', None),
+                'phone': getattr(cl, 'phone', None),
+            }
+            for cl in clients
+        ]
+        return jsonify(items)
+    except Exception as e:
+        app.logger.error(f"Error in api_clients_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/clients/<int:client_id>', methods=['GET'])
+@requires_auth
+def api_client_detail(client_id):
+    try:
+        cl = db.session.get(Client, client_id)
+        if cl is None:
+            abort(404)
+        cases = Case.query.filter_by(client_id=client_id).order_by(Case.created_at.desc()).all()
+        result = {
+            'id': cl.id,
+            'first_name': getattr(cl, 'first_name', None),
+            'last_name': getattr(cl, 'last_name', None),
+            'email': getattr(cl, 'email', None),
+            'phone': getattr(cl, 'phone', None),
+            'address': getattr(cl, 'address', None),
+            'cases': [
+                {
+                    'id': c.id,
+                    'title': c.title,
+                    'status': c.status,
+                    'created_at': c.created_at.isoformat() if getattr(c, 'created_at', None) else None,
+                }
+                for c in cases
+            ]
+        }
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error(f"Error in api_client_detail: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/clients', methods=['POST'])
+@requires_auth
+def api_client_create():
+    try:
+        data = request.get_json() or {}
+        first_name = (data.get('first_name') or '').strip()
+        last_name = (data.get('last_name') or '').strip()
+        email = (data.get('email') or None)
+        phone = (data.get('phone') or None)
+        address = (data.get('address') or None)
+        if not first_name or not last_name:
+            return jsonify({'error': 'first_name and last_name required'}), 400
+        cl = Client(first_name=first_name, last_name=last_name, email=email, phone=phone, address=address)
+        db.session.add(cl)
+        db.session.commit()
+        return jsonify({'ok': True, 'id': cl.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_client_create: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/clients/<int:client_id>', methods=['PATCH'])
+@requires_auth
+def api_client_update(client_id):
+    try:
+        cl = db.session.get(Client, client_id)
+        if cl is None:
+            abort(404)
+        data = request.get_json() or {}
+        for field in ['first_name', 'last_name', 'email', 'phone', 'address']:
+            if field in data:
+                setattr(cl, field, data.get(field))
+        cl.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_client_update: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/actions', methods=['GET'])
+@requires_auth
+def api_actions_list():
+    try:
+        client_id = request.args.get('client_id', type=int)
+        q = db.session.query(Action).options(
+            db.joinedload(Action.case_actions).joinedload(CaseAction.case),
+            db.joinedload(Action.assigned_to)
+        ).order_by(Action.created_at.desc())
+        if client_id:
+            q = q.join(CaseAction, CaseAction.action_id == Action.id).join(Case, Case.id == CaseAction.case_id).filter(Case.client_id == client_id)
+        actions = q.all()
+        def case_title_for(a: Action):
+            if getattr(a, 'case_actions', None):
+                for link in a.case_actions:
+                    if getattr(link, 'case', None):
+                        return getattr(link.case, 'title', None)
+            return None
+        def case_id_for(a: Action):
+            if getattr(a, 'case_actions', None):
+                for link in a.case_actions:
+                    if getattr(link, 'case', None):
+                        return getattr(link.case, 'id', None)
+            return None
+        items = [
+            {
+                'id': a.id,
+                'title': a.title,
+                'status': a.status,
+                'priority': getattr(a, 'priority', None),
+                'due_date': a.due_date.isoformat() if getattr(a, 'due_date', None) else None,
+                'assigned_to_id': getattr(a, 'assigned_to_id', None),
+                'case_id': case_id_for(a),
+                'case_title': case_title_for(a),
+            }
+            for a in actions
+        ]
+        return jsonify(items)
+    except Exception as e:
+        app.logger.error(f"Error in api_actions_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/actions', methods=['POST'])
+@requires_auth
+def api_action_create():
+    try:
+        data = request.get_json() or {}
+        title = (data.get('title') or '').strip()
+        if not title:
+            return jsonify({'error': 'title required'}), 400
+        description = data.get('description') or ''
+        action_type = data.get('action_type')
+        status = data.get('status') or 'pending'
+        priority = data.get('priority') or 'medium'
+        due_date = None
+        if data.get('due_date'):
+            try:
+                due_date = datetime.fromisoformat(data['due_date'])
+            except Exception:
+                pass
+        assigned_to_id = data.get('assigned_to_id')
+        case_id = data.get('case_id')
+        a = Action(
+            title=title,
+            description=description,
+            action_type=action_type,
+            status=status,
+            priority=priority,
+            due_date=due_date,
+            assigned_to_id=assigned_to_id,
+            created_by_id=_current_user_id(),
+        )
+        db.session.add(a)
+        db.session.flush()
+        if case_id:
+            link = CaseAction(case_id=case_id, action_id=a.id, assigned_to_id=assigned_to_id, status=status)
+            db.session.add(link)
+        db.session.commit()
+        return jsonify({'ok': True, 'id': a.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_action_create: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/email/drafts', methods=['GET'])
+@requires_auth
+def api_email_drafts_list():
+    try:
+        drafts = EmailDraft.query.order_by(EmailDraft.created_at.desc()).all()
+        return jsonify([d.to_dict() for d in drafts])
+    except Exception as e:
+        app.logger.error(f"Error in api_email_drafts_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/email/drafts/<int:draft_id>', methods=['GET'])
+@requires_auth
+def api_email_draft_detail(draft_id):
+    try:
+        d = db.session.get(EmailDraft, draft_id)
+        if d is None:
+            abort(404)
+        return jsonify(d.to_dict())
+    except Exception as e:
+        app.logger.error(f"Error in api_email_draft_detail: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/email/drafts/<int:draft_id>/send', methods=['POST'])
+@requires_auth
+def api_email_draft_send(draft_id):
+    try:
+        d = db.session.get(EmailDraft, draft_id)
+        if d is None:
+            abort(404)
+        d.status = 'sent'
+        d.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_email_draft_send: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/email/drafts/<int:draft_id>', methods=['DELETE'])
+@requires_auth
+def api_email_draft_delete(draft_id):
+    try:
+        d = db.session.get(EmailDraft, draft_id)
+        if d is None:
+            abort(404)
+        db.session.delete(d)
+        db.session.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_email_draft_delete: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Email Queue visibility and retry
+@app.route('/api/email/queue', methods=['GET'])
+@requires_auth
+def api_email_queue_list():
+    try:
+        status = (request.args.get('status') or '').strip()
+        q = db.session.query(EmailQueue).options(db.joinedload(EmailQueue.case)).order_by(EmailQueue.created_at.desc())
+        if status in ('pending', 'sent', 'failed'):
+            q = q.filter(EmailQueue.status == status)
+        items = []
+        for e in q.all():
+            d = e.to_dict()
+            d['case_title'] = getattr(e.case, 'title', None)
+            items.append(d)
+        return jsonify(items)
+    except Exception as e:
+        app.logger.error(f"Error in api_email_queue_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/email/queue/<int:item_id>/retry', methods=['POST'])
+@requires_auth
+def api_email_queue_retry(item_id):
+    try:
+        item = db.session.get(EmailQueue, item_id)
+        if item is None:
+            abort(404)
+        item.status = 'pending'
+        item.attempts = 0
+        item.last_error = None
+        item.send_after = datetime.utcnow()
+        item.updated_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_email_queue_retry: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/actions/<int:action_id>', methods=['GET'])
+@requires_auth
+def api_action_detail(action_id):
+    try:
+        a = db.session.get(Action, action_id)
+        if a is None:
+            abort(404)
+        # Find first related case via CaseAction if exists
+        link = CaseAction.query.filter_by(action_id=action_id).join(Case).first()
+        result = {
+            'id': a.id,
+            'title': a.title,
+            'description': getattr(a, 'description', None),
+            'status': a.status,
+            'priority': getattr(a, 'priority', None),
+            'due_date': a.due_date.isoformat() if getattr(a, 'due_date', None) else None,
+            'assigned_to_id': getattr(a, 'assigned_to_id', None),
+            'case': {
+                'id': getattr(link.case, 'id', None) if link and getattr(link, 'case', None) else None,
+                'title': getattr(link.case, 'title', None) if link and getattr(link, 'case', None) else None,
+            } if link else None,
+        }
+        return jsonify(result)
+    except Exception as e:
+        app.logger.error(f"Error in api_action_detail: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Documents list (JSON)
+@app.route('/api/documents', methods=['GET'])
+@requires_auth
+def api_documents_list():
+    try:
+        documents = db.session.query(Document).options(
+            db.joinedload(Document.case),
+            db.joinedload(Document.uploaded_by)
+        ).order_by(Document.created_at.desc()).all()
+        items = [
+            {
+                'id': d.id,
+                'name': d.name,
+                'file_type': getattr(d, 'file_type', None),
+                'file_size': getattr(d, 'file_size', None),
+                'created_at': d.created_at.isoformat() if getattr(d, 'created_at', None) else None,
+                'case': {
+                    'id': d.case.id if getattr(d, 'case', None) else None,
+                    'title': getattr(d.case, 'title', None) if getattr(d, 'case', None) else None,
+                }
+            }
+            for d in documents
+        ]
+        return jsonify(items)
+    except Exception as e:
+        app.logger.error(f"Error in api_documents_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/documents/upload', methods=['POST'])
+@requires_auth
+def api_documents_upload():
+    try:
+        # Expecting multipart/form-data with fields: file, case_id (optional), name (optional)
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file part'}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No selected file'}), 400
+        case_id = request.form.get('case_id')
+        case_id = int(case_id) if case_id else None
+        custom_name = request.form.get('name')
+
+        # Save file
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        filename = secure_filename(custom_name or (file.filename or f"upload_{datetime.utcnow().timestamp()}"))
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        # Persist document
+        doc = Document(
+            name=filename,
+            file_path=file_path,
+            file_type=mimetypes.guess_type(filename)[0] or 'application/octet-stream',
+            file_size=os.path.getsize(file_path),
+            uploaded_by_id=_current_user_id(),
+            case_id=case_id,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(doc)
+        db.session.commit()
+        return jsonify({'id': doc.id, 'name': doc.name}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_documents_upload: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Calendar list (JSON)
+@app.route('/api/calendar', methods=['GET'])
+@requires_auth
+def api_calendar_list():
+    try:
+        events = CalendarEvent.query.options(
+            db.joinedload(CalendarEvent.case),
+            db.joinedload(CalendarEvent.client)
+        ).order_by(CalendarEvent.start_at.asc()).all()
+        items = [
+            {
+                'id': ev.id,
+                'title': ev.title,
+                'description': getattr(ev, 'description', None),
+                'start_at': ev.start_at.isoformat() if getattr(ev, 'start_at', None) else None,
+                'end_at': ev.end_at.isoformat() if getattr(ev, 'end_at', None) else None,
+                'all_day': getattr(ev, 'all_day', False),
+                'location': getattr(ev, 'location', None),
+                'case': {
+                    'id': ev.case.id if getattr(ev, 'case', None) else None,
+                    'title': getattr(ev.case, 'title', None) if getattr(ev, 'case', None) else None,
+                },
+                'client': {
+                    'id': ev.client.id if getattr(ev, 'client', None) else None,
+                    'name': (f"{getattr(ev.client, 'first_name', '')} {getattr(ev.client, 'last_name', '')}").strip() if getattr(ev, 'client', None) else None,
+                }
+            }
+            for ev in events
+        ]
+        return jsonify(items)
+    except Exception as e:
+        app.logger.error(f"Error in api_calendar_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/calendar', methods=['POST'])
+@requires_auth
+def api_calendar_create():
+    try:
+        data = request.get_json() or {}
+        title = data.get('title')
+        if not (title and isinstance(title, str)):
+            return jsonify({'error': 'title required'}), 400
+        description = data.get('description')
+        location = data.get('location')
+        all_day = bool(data.get('all_day'))
+        reminder = int(data.get('reminder_minutes_before') or 0)
+        case_id = data.get('case_id')
+        client_id = data.get('client_id')
+        start_iso = data.get('start_at')
+        end_iso = data.get('end_at')
+        start_at = datetime.fromisoformat(start_iso) if start_iso else None
+        end_at = datetime.fromisoformat(end_iso) if end_iso else None
+
+        ev = CalendarEvent(
+            title=title,
+            description=description,
+            start_at=start_at,
+            end_at=end_at,
+            all_day=all_day,
+            location=location,
+            case_id=int(case_id) if case_id else None,
+            client_id=int(client_id) if client_id else None,
+            created_by_id=_current_user_id(),
+            reminder_minutes_before=reminder,
+            status='scheduled'
+        )
+        db.session.add(ev)
+        db.session.commit()
+        return jsonify({'id': ev.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_calendar_create: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Settings (JSON)
+@app.route('/api/settings', methods=['GET'])
+@requires_auth
+def api_settings():
+    try:
+        user_id = _current_user_id()
+        if not user_id:
+            return jsonify({'error': 'unauthorized'}), 401
+        from models import OAuthAccount
+        google_acc = OAuthAccount.query.filter_by(user_id=user_id, provider='google', status='connected').first()
+        ms_acc = OAuthAccount.query.filter_by(user_id=user_id, provider='microsoft', status='connected').first()
+        def acc_details(acc):
+            if not acc:
+                return None
+            return {
+                'connected_at': acc.connected_at.strftime('%Y-%m-%d %H:%M') if acc.connected_at else None,
+                'expires_at': acc.expires_at.strftime('%Y-%m-%d %H:%M') if acc.expires_at else None,
+                'scopes': acc.scopes
+            }
+        user_pref = NotificationPreference.query.filter_by(user_id=user_id).first()
+        providers = {
+            'google': {
+                'connected': bool(google_acc),
+                'details': acc_details(google_acc)
+            },
+            'microsoft': {
+                'connected': bool(ms_acc),
+                'details': acc_details(ms_acc)
+            }
+        }
+        prefs = {
+            'minutes_before': getattr(user_pref, 'minutes_before', 60),
+            'email_enabled': getattr(user_pref, 'email_enabled', True)
+        }
+        return jsonify({'providers': providers, 'preferences': prefs})
+    except Exception as e:
+        app.logger.error(f"Error in api_settings: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/settings/notifications', methods=['POST'])
+@requires_auth
+def api_settings_notifications():
+    try:
+        user_id = _current_user_id()
+        if not user_id:
+            return jsonify({'error': 'unauthorized'}), 401
+        data = request.get_json() or {}
+        minutes_before = int(data.get('minutes_before') or 60)
+        email_enabled = bool(data.get('email_enabled'))
+        pref = NotificationPreference.query.filter_by(user_id=user_id).first()
+        if not pref:
+            pref = NotificationPreference(user_id=user_id)
+            db.session.add(pref)
+        pref.minutes_before = minutes_before
+        pref.email_enabled = email_enabled
+        db.session.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_settings_notifications: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Billing summary (JSON)
+@app.route('/api/billing', methods=['GET'])
+@requires_auth
+def api_billing_summary():
+    try:
+        invoices = Invoice.query.options(db.joinedload(Invoice.client), db.joinedload(Invoice.case)).order_by(Invoice.created_at.desc()).limit(50).all()
+        entries = TimeEntry.query.options(db.joinedload(TimeEntry.user), db.joinedload(TimeEntry.case), db.joinedload(TimeEntry.invoice)).order_by(TimeEntry.created_at.desc()).limit(50).all()
+        expenses = Expense.query.options(db.joinedload(Expense.user), db.joinedload(Expense.case), db.joinedload(Expense.invoice)).order_by(Expense.created_at.desc()).limit(50).all()
+        inv_items = [
+            {
+                'id': i.id,
+                'invoice_number': getattr(i, 'invoice_number', None),
+                'status': getattr(i, 'status', None),
+                'total_amount': float(getattr(i, 'total_amount', 0) or 0),
+                'balance_due': float(getattr(i, 'balance_due', 0) or 0),
+                'created_at': i.created_at.isoformat() if getattr(i, 'created_at', None) else None,
+                'case': {
+                    'id': i.case.id if getattr(i, 'case', None) else None,
+                    'title': getattr(i.case, 'title', None) if getattr(i, 'case', None) else None,
+                }
+            }
+            for i in invoices
+        ]
+        entry_items = [
+            {
+                'id': t.id,
+                'hours': float(getattr(t, 'hours', 0) or 0),
+                'rate': float(getattr(t, 'rate', 0) or 0),
+                'description': getattr(t, 'description', None),
+                'created_at': t.created_at.isoformat() if getattr(t, 'created_at', None) else None,
+                'case': {'id': t.case.id if getattr(t, 'case', None) else None, 'title': getattr(t.case, 'title', None) if getattr(t, 'case', None) else None}
+            }
+            for t in entries
+        ]
+        expense_items = [
+            {
+                'id': e.id,
+                'amount': float(getattr(e, 'amount', 0) or 0),
+                'description': getattr(e, 'description', None),
+                'created_at': e.created_at.isoformat() if getattr(e, 'created_at', None) else None,
+                'case': {'id': e.case.id if getattr(e, 'case', None) else None, 'title': getattr(e.case, 'title', None) if getattr(e, 'case', None) else None}
+            }
+            for e in expenses
+        ]
+        return jsonify({'invoices': inv_items, 'time_entries': entry_items, 'expenses': expense_items})
+    except Exception as e:
+        app.logger.error(f"Error in api_billing_summary: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
 # ---- Payments / Trust / Invoice Ops ----
 @app.route('/billing/invoices/<int:invoice_id>/pay-mock', methods=['POST'])
 @login_required
@@ -765,21 +1676,56 @@ def trust_transfer():
 @login_required
 @requires_auth
 def invoice_pdf(invoice_id):
-    invoice = db.session.get(Invoice, invoice_id)
-    if invoice is None:
-        abort(404)
-    # Render simple HTML and save as .html (mock PDF)
-    html = render_template('invoice_pdf.html', invoice=invoice)
-    pdf_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'invoices')
-    os.makedirs(pdf_dir, exist_ok=True)
-    pdf_path = os.path.join(pdf_dir, f"{invoice.invoice_number}.pdf")
-    with open(pdf_path, 'w', encoding='utf-8') as f:
-        f.write(html)
-    invoice.pdf_generated = True
-    invoice.pdf_path = pdf_path
-    db.session.commit()
-    flash('Invoice PDF generated (mock).', 'info')
-    return send_file(pdf_path, as_attachment=True, download_name=f"{invoice.invoice_number}.pdf")
+    # Redirect legacy HTML route to the proper API-based PDF generator
+    return redirect(url_for('api_invoice_pdf', invoice_id=invoice_id), code=302)
+
+# New: Proper PDF generation API returning application/pdf
+@app.route('/api/billing/invoices/<int:invoice_id>/pdf', methods=['GET'])
+@login_required
+@requires_auth
+def api_invoice_pdf(invoice_id):
+    try:
+        invoice = db.session.get(Invoice, invoice_id)
+        if invoice is None:
+            abort(404)
+        try:
+            # Prefer ReportLab if installed
+            from reportlab.lib.pagesizes import LETTER
+            from reportlab.pdfgen import canvas
+            import io
+            buf = io.BytesIO()
+            c = canvas.Canvas(buf, pagesize=LETTER)
+            width, height = LETTER
+            y = height - 72
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(72, y, f"Invoice {getattr(invoice, 'invoice_number', invoice.id)}")
+            y -= 24
+            c.setFont("Helvetica", 11)
+            c.drawString(72, y, f"Client: {getattr(invoice.client, 'first_name', '')} {getattr(invoice.client, 'last_name', '')}")
+            y -= 18
+            c.drawString(72, y, f"Case: {getattr(getattr(invoice, 'case', None), 'title', '-')}")
+            y -= 18
+            c.drawString(72, y, f"Status: {getattr(invoice, 'status', '-')}")
+            y -= 18
+            c.drawString(72, y, f"Total Amount: {float(getattr(invoice, 'total_amount', 0) or 0):.2f}")
+            y -= 18
+            c.drawString(72, y, f"Balance Due: {float(getattr(invoice, 'balance_due', 0) or 0):.2f}")
+            y -= 24
+            c.drawString(72, y, f"Created: {invoice.created_at.strftime('%Y-%m-%d') if getattr(invoice, 'created_at', None) else '-'}")
+            c.showPage()
+            c.save()
+            pdf_bytes = buf.getvalue()
+            buf.close()
+            return Response(pdf_bytes, mimetype='application/pdf', headers={
+                'Content-Disposition': f'inline; filename="invoice_{invoice_id}.pdf"'
+            })
+        except Exception as e:
+            # ReportLab not installed or generation failed
+            current_app.logger.error(f"PDF generation failed: {str(e)}")
+            return jsonify({'error': 'PDF generator not available'}), 501
+    except Exception as e:
+        current_app.logger.error(f"/api/billing/invoices/{invoice_id}/pdf error: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
 
 @app.route('/billing/invoices/<int:invoice_id>/email')
 @login_required
@@ -1023,6 +1969,15 @@ def transcribe():
         if file.filename == '':
             return jsonify({'error': 'No selected file'}), 400
         if file:
+            # Basic server-side validation: type and size
+            if not _is_allowed_audio(file.filename, getattr(file, 'mimetype', '')):
+                return jsonify({'error': 'Unsupported audio type'}), 415
+            try:
+                clen = request.content_length or 0
+                if clen and clen > app.config.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024):
+                    return jsonify({'error': 'File too large'}), 413
+            except Exception:
+                pass
             filename = secure_filename(file.filename or f"recording_{datetime.utcnow().timestamp()}.webm")
             temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(temp_path)
@@ -1052,12 +2007,90 @@ def transcribe():
                 return jsonify({'error': str(e)}), 500
     return render_template('transcribe.html')
 
+# ---- Staff JSON APIs for transcription ----
+@app.route('/api/transcribe', methods=['POST'])
+@requires_auth
+def api_transcribe_start():
+    if 'audio_file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    file = request.files['audio_file']
+    if not file or file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    # Validate file type and size
+    if not _is_allowed_audio(file.filename, getattr(file, 'mimetype', '')):
+        return jsonify({'error': 'Unsupported audio type'}), 415
+    try:
+        clen = request.content_length or 0
+        if clen and clen > app.config.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024):
+            return jsonify({'error': 'File too large'}), 413
+    except Exception:
+        pass
+    filename = secure_filename(file.filename or f"recording_{datetime.utcnow().timestamp()}.webm")
+    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(temp_path)
+    try:
+        service = STTService()
+        transcript_id = service.start_transcription(temp_path)
+        # Persist Transcript row if not exists
+        t = Transcript(
+            provider='assemblyai',
+            external_id=transcript_id,
+            status='processing',
+            user_id=_current_user_id()
+        )
+        db.session.add(t)
+        db.session.commit()
+        return jsonify({'status': 'processing', 'transcript_id': transcript_id})
+    except Exception as e:
+        app.logger.error(f"api_transcribe_start error: {str(e)}")
+        return jsonify({'error': 'Failed to start transcription'}), 500
+    finally:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+@app.route('/api/transcripts/<string:external_id>', methods=['GET'])
+@requires_auth
+def api_transcript_status(external_id: str):
+    # Look up Transcript by external id
+    t = Transcript.query.filter_by(external_id=external_id).first()
+    if not t:
+        # In case row not persisted earlier, return minimal status
+        t = Transcript(provider='assemblyai', external_id=external_id, status='processing')
+        db.session.add(t)
+        db.session.commit()
+    # If not completed, try to refresh from provider
+    if t.status != 'completed':
+        try:
+            service = STTService()
+            data = service.get_transcription_status(external_id)
+            # Expect data like {'status': 'completed'|'processing'|'error', 'text': '...'}
+            new_status = data.get('status') or t.status
+            t.status = new_status
+            if new_status == 'completed' and data.get('text'):
+                t.text = data.get('text')
+            if new_status == 'error':
+                t.text = None
+            db.session.commit()
+        except Exception as e:
+            app.logger.error(f"Error fetching transcription status: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+    payload = {
+        'transcript_id': external_id,
+        'status': t.status,
+        'text': getattr(t, 'text', None),
+        'error': getattr(t, 'error', None),
+    }
+    return jsonify(payload)
+
 # -------- Client Portal Login/Logout -------- #
 @app.route('/portal/login', methods=['GET', 'POST'])
 def portal_login():
     if request.method == 'POST':
-        email = request.form.get('email','').strip().lower()
-        password = request.form.get('password','')
+        # Support legacy form POST for compatibility
+        email = (request.form.get('email') or '').strip().lower()
+        password = request.form.get('password') or ''
         cu = ClientUser.query.filter(db.func.lower(ClientUser.email)==email).first()
         if cu and cu.check_password(password):
             session['client_user_id'] = cu.id
@@ -1066,7 +2099,28 @@ def portal_login():
             return redirect(url_for('portal_invoices'))
         else:
             flash('Invalid portal credentials', 'danger')
-    return render_template('portal_login.html')
+            return redirect(url_for('portal_login'))
+    # For GET, redirect to Next.js portal login page
+    return redirect('http://localhost:3000/portal/login', code=301)
+
+# JSON endpoint for portal login to be called from Next.js
+@app.route('/api/portal/login', methods=['POST'])
+def api_portal_login():
+    try:
+        data = request.get_json(silent=True) or {}
+        email = str(data.get('email', '')).strip().lower()
+        password = str(data.get('password', ''))
+        if not email or not password:
+            return jsonify({'ok': False, 'error': 'Missing credentials'}), 400
+        cu = ClientUser.query.filter(db.func.lower(ClientUser.email)==email).first()
+        if cu and cu.check_password(password):
+            session['client_user_id'] = cu.id
+            session.permanent = True
+            return jsonify({'ok': True})
+        return jsonify({'ok': False, 'error': 'Invalid credentials'}), 401
+    except Exception as e:
+        app.logger.error(f"portal login error: {str(e)}")
+        return jsonify({'ok': False, 'error': 'Server error'}), 500
 
 @app.route('/portal/logout')
 def portal_logout():
@@ -1148,6 +2202,40 @@ def _auto_letters(category, analysis, client_name='[CLIENT]'):
         )
     return []
 
+def _analyze_text(text: str) -> dict:
+    """Analyze intake text using AssemblyAI if enabled, else rule-based. Returns normalized dict."""
+    result = None
+    if USE_AAI_ANALYZER and ASSEMBLYAI_API_KEY:
+        try:
+            result = analyze_with_aai(text)
+        except Exception as e:
+            app.logger.error(f"analyze_with_aai failed in _analyze_text: {str(e)}; falling back")
+    if result is None:
+        result = analyze_intake_text_scenarios(text)
+    # Ensure keys exist
+    out = {
+        'category': result.get('category'),
+        'urgency': result.get('urgency'),
+        'key_facts': result.get('key_facts', {}),
+        'dates': result.get('dates', {}),
+        'parties': result.get('parties', {}),
+        'suggested_actions': result.get('suggested_actions', []),
+        'checklists': result.get('checklists', {}),
+        'department': result.get('department'),
+        'confidence': result.get('confidence'),
+        'priority': result.get('priority'),
+    }
+    # Derive priority from urgency if missing
+    if not out.get('priority') and out.get('urgency'):
+        u = str(out['urgency']).strip().lower()
+        if u == 'high':
+            out['priority'] = 'high'
+        elif u.startswith('med'):
+            out['priority'] = 'medium'
+        else:
+            out['priority'] = 'low'
+    return out
+
 @app.route('/api/intake/auto', methods=['POST'])
 @login_required
 def auto_intake():
@@ -1178,8 +2266,8 @@ def auto_intake():
             db.session.add(db_client)
             db.session.flush()
 
-        # Analyze
-        analysis = analyze_intake_text_scenarios(text)
+        # Analyze (AssemblyAI if enabled, else rule-based)
+        analysis = _analyze_text(text)
 
         # Create case
         new_case = Case(
@@ -1228,55 +2316,6 @@ def auto_intake():
             db.session.add(link)
             created_actions.append(action.id)
 
-        # Slip/Fall specific tasks
-        if (analysis.get('category') or '').startswith('Personal Injury'):
-            date_hint = analysis.get('dates', {}).get('incident_date') if isinstance(analysis.get('dates'), dict) else None
-            time_hint = analysis.get('dates', {}).get('incident_time') if isinstance(analysis.get('dates'), dict) else None
-            # Staff info request
-            sf1 = Action(
-                title=f"Request complete list of employees working on {date_hint or '[DATE]'} during {time_hint or '[TIME]'}",
-                description='Ask for names of all staff on duty; who was responsible for cleaning/mopping; manager on duty and contact.',
-                action_type='request',
-                status='pending',
-                priority='high',
-                due_date=datetime.utcnow() + timedelta(days=1),
-                assigned_to_id=None,
-                created_by_id=current_user.id
-            )
-            db.session.add(sf1); db.session.flush()
-            db.session.add(CaseAction(case_id=new_case.id, action_id=sf1.id, status='pending'))
-            created_actions.append(sf1.id)
-
-            # Security footage
-            sf2 = Action(
-                title='Obtain security footage (Produce, Entrance, Registers)',
-                description='Request footage for 2 hours before and after incident; include camera identifiers if available.',
-                action_type='evidence',
-                status='pending',
-                priority='high',
-                due_date=datetime.utcnow() + timedelta(days=1),
-                assigned_to_id=None,
-                created_by_id=current_user.id
-            )
-            db.session.add(sf2); db.session.flush()
-            db.session.add(CaseAction(case_id=new_case.id, action_id=sf2.id, status='pending'))
-            created_actions.append(sf2.id)
-
-            # Medical records checklist task
-            sf3 = Action(
-                title='Obtain medical records (see checklist)',
-                description='Use the generated medical checklist document to collect required records.',
-                action_type='records',
-                status='pending',
-                priority='medium',
-                due_date=datetime.utcnow() + timedelta(days=2),
-                assigned_to_id=None,
-                created_by_id=current_user.id
-            )
-            db.session.add(sf3); db.session.flush()
-            db.session.add(CaseAction(case_id=new_case.id, action_id=sf3.id, status='pending'))
-            created_actions.append(sf3.id)
-
         # Create draft letters as documents (no email sent in dev)
         letters = _auto_letters(analysis.get('category') or '', analysis, client_name=f"{db_client.first_name} {db_client.last_name}")
         created_docs = []
@@ -1297,6 +2336,23 @@ def auto_intake():
                 db.session.add(draft)
                 db.session.flush()
                 email_drafts_created.append(draft.id)
+                # Auto-queue preservation/notice letters to send in 1 hour
+                fname_l = (fname or '').lower()
+                should_queue = any(k in fname_l for k in [
+                    'preservation', 'police_report_request', 'dot_camera_request', 'hospital_lit_hold', 'employment_lit_hold', 'medical_records_request'
+                ])
+                if should_queue:
+                    subject = _extract_subject_from_letter(content) or (draft.subject or 'Legal Notice')
+                    q = EmailQueue(
+                        case_id=new_case.id,
+                        draft_id=draft.id,
+                        to=None,
+                        subject=subject,
+                        body=content,
+                        send_after=datetime.utcnow() + timedelta(hours=1),
+                        status='pending'
+                    )
+                    db.session.add(q)
             except Exception:
                 db.session.rollback()
 
@@ -1495,6 +2551,270 @@ def auto_intake():
         db.session.rollback()
         app.logger.error(f"Error in auto_intake: {str(e)}")
 
+@app.route('/api/intake/auto/staff', methods=['POST'])
+@requires_auth
+def auto_intake_staff():
+    """Staff-auth version of auto_intake using Basic Auth, no session required."""
+    data = request.get_json()
+    text = (data or {}).get('text') or ''
+    client = (data or {}).get('client') or {}
+    case_title = (data or {}).get('title') or 'Client Intake'
+
+    if not text.strip():
+        return jsonify({'error': 'No text provided'}), 400
+
+    try:
+        # Resolve a user id for created_by fields
+        user_id = _current_user_id()
+
+        # Find or create client (by email, then phone)
+        db_client = None
+        if client.get('email'):
+            db_client = Client.query.filter_by(email=client['email']).first()
+        if db_client is None and client.get('phone'):
+            db_client = Client.query.filter_by(phone=client['phone']).first()
+        if db_client is None:
+            db_client = Client(
+                first_name=client.get('first_name') or 'Client',
+                last_name=client.get('last_name') or 'Unknown',
+                email=client.get('email'),
+                phone=client.get('phone'),
+                address=client.get('address')
+            )
+            db.session.add(db_client)
+            db.session.flush()
+
+        # Analyze (AssemblyAI if enabled, else rule-based)
+        analysis = _analyze_text(text)
+
+        # Create case
+        new_case = Case(
+            title=case_title,
+            description=text,
+            case_type=analysis.get('category'),
+            status='open',
+            priority=(analysis.get('priority') or 'Medium').lower(),
+            client_id=db_client.id,
+            created_by_id=user_id,
+            assigned_to_id=None,
+        )
+        db.session.add(new_case)
+        db.session.flush()
+
+        # Save AI insight
+        insight = AIInsight(
+            case_id=new_case.id,
+            insight_text=f"{analysis.get('category')} | Urgency: {analysis.get('urgency')} | Dept: {analysis.get('department')}",
+            category='scenario_analysis',
+            confidence=None,
+        )
+        db.session.add(insight)
+
+        # Create actions from suggested actions
+        created_actions = []
+        for text_action in (analysis.get('suggested_actions') or [])[:10]:
+            action = Action(
+                title=text_action,
+                description='Auto-generated from scenario analysis',
+                action_type='automation',
+                status='pending',
+                priority=(analysis.get('priority') or 'Medium').lower(),
+                due_date=datetime.utcnow() + timedelta(days=1),
+                assigned_to_id=None,
+                created_by_id=user_id
+            )
+            db.session.add(action)
+            db.session.flush()
+            link = CaseAction(
+                case_id=new_case.id,
+                action_id=action.id,
+                status='pending',
+                assigned_to_id=None
+            )
+            db.session.add(link)
+            created_actions.append(action.id)
+
+        # Create draft letters as documents (no email sent in dev)
+        letters = _auto_letters(analysis.get('category') or '', analysis, client_name=f"{db_client.first_name} {db_client.last_name}")
+        created_docs = []
+        email_drafts_created = []
+        for fname, content in letters:
+            doc = _write_document(new_case.id, fname, content, uploaded_by_id=user_id)
+            created_docs.append(doc.id)
+            try:
+                draft = EmailDraft(
+                    case_id=new_case.id,
+                    to=None,
+                    subject=f"Draft: {fname.replace('_', ' ').title()}",
+                    body=f"Please review attached draft document: {fname}",
+                    attachments=str(doc.id),
+                    status='draft'
+                )
+                db.session.add(draft)
+                db.session.flush()
+                email_drafts_created.append(draft.id)
+            except Exception:
+                db.session.rollback()
+
+        # Deadlines (reuse same logic by calling category-specific block)
+        category = analysis.get('category', '')
+        base_date = datetime.utcnow()
+        dates_list = analysis.get('dates', [])
+        if isinstance(dates_list, list) and dates_list:
+            try:
+                base_date = datetime.strptime(dates_list[0], '%Y-%m-%d')
+            except Exception:
+                pass
+
+        if category.startswith('Personal Injury'):
+            evidence_deadline = base_date + timedelta(days=EVIDENCE_RETENTION_DAYS)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Security Footage Retention Deadline',
+                due_date=evidence_deadline,
+                source='slip_fall_evidence',
+                notes=f'Security footage typically deleted after {EVIDENCE_RETENTION_DAYS} days. URGENT: Send preservation letter immediately.'
+            ))
+            statute_deadline = base_date + timedelta(days=730)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Statute of Limitations',
+                due_date=statute_deadline,
+                source='statute_of_limitations',
+                notes='Must file lawsuit before this date. Verify state-specific statute.'
+            ))
+            medical_deadline = datetime.utcnow() + timedelta(days=14)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Medical Records Collection',
+                due_date=medical_deadline,
+                source='medical_records',
+                notes='Obtain all medical records within 14 days.'
+            ))
+        elif category.startswith('Car Accident'):
+            police_deadline = datetime.utcnow() + timedelta(days=7)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Police Report Request',
+                due_date=police_deadline,
+                source='police_report',
+                notes='Request police report and dash cam footage within 7 days.'
+            ))
+            camera_deadline = datetime.utcnow() + timedelta(days=30)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Traffic Camera Footage Deadline',
+                due_date=camera_deadline,
+                source='traffic_camera',
+                notes='Traffic camera footage typically retained 30-90 days. Request immediately.'
+            ))
+            medical_eval_deadline = datetime.utcnow() + timedelta(days=2)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Medical Evaluation',
+                due_date=medical_eval_deadline,
+                source='medical_evaluation',
+                notes='Schedule medical evaluation within 48 hours of accident.'
+            ))
+            statute_deadline = base_date + timedelta(days=730)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Statute of Limitations',
+                due_date=statute_deadline,
+                source='statute_of_limitations',
+                notes='Must file lawsuit before this date. Verify state-specific statute.'
+            ))
+        elif category.startswith('Employment Law'):
+            eeoc_deadline = base_date + timedelta(days=180)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='EEOC Filing Deadline (Federal)',
+                due_date=eeoc_deadline,
+                source='eeoc_filing',
+                notes='Must file EEOC charge within 180 days (300 days in deferral states). CRITICAL DEADLINE.'
+            ))
+            evidence_deadline = datetime.utcnow() + timedelta(days=7)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Send Litigation Hold Letter',
+                due_date=evidence_deadline,
+                source='employment_evidence',
+                notes='Send litigation hold to employer immediately. Emails may be deleted.'
+            ))
+            personnel_deadline = datetime.utcnow() + timedelta(days=14)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Personnel File Request',
+                due_date=personnel_deadline,
+                source='personnel_file',
+                notes='Request complete personnel file within 14 days.'
+            ))
+        elif category.startswith('Medical Malpractice'):
+            records_deadline = datetime.utcnow() + timedelta(days=7)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Medical Records Request (URGENT)',
+                due_date=records_deadline,
+                source='medical_records',
+                notes='Request all medical records immediately. Include operative reports, count sheets, imaging.'
+            ))
+            expert_deadline = datetime.utcnow() + timedelta(days=30)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Retain Medical Expert Witness',
+                due_date=expert_deadline,
+                source='expert_witness',
+                notes='Retain medical expert for case review and Certificate of Merit.'
+            ))
+            merit_deadline = datetime.utcnow() + timedelta(days=60)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Certificate of Merit',
+                due_date=merit_deadline,
+                source='certificate_of_merit',
+                notes='Many states require Certificate of Merit within 60-90 days of filing. Verify state requirements.'
+            ))
+            statute_deadline = base_date + timedelta(days=730)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Statute of Limitations',
+                due_date=statute_deadline,
+                source='statute_of_limitations',
+                notes='Medical malpractice has SHORT statute. May be 1-2 years. Verify state law and discovery rule.'
+            ))
+            discovery_deadline = datetime.utcnow() + timedelta(days=365)
+            db.session.add(Deadline(
+                case_id=new_case.id,
+                name='Discovery Rule Deadline',
+                due_date=discovery_deadline,
+                source='discovery_rule',
+                notes='Alternative statute from date of discovery. Verify which date applies in your state.'
+            ))
+
+        db.session.commit()
+
+        # Best-effort link latest transcript for this user
+        try:
+            t = Transcript.query.filter_by(user_id=user_id).order_by(Transcript.created_at.desc()).first()
+            if t and (t.case_id is None):
+                t.case_id = new_case.id
+                t.client_id = db_client.id
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+        return jsonify({
+            'status': 'success',
+            'case_id': new_case.id,
+            'actions_created': created_actions,
+            'documents_created': created_docs,
+            'email_drafts_created': email_drafts_created,
+            'analysis': analysis
+        }), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in auto_intake_staff: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
 @app.route('/documents/<int:document_id>')
 @login_required
 def view_document(document_id):
