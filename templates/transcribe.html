@@ -207,6 +207,7 @@
                     </div>
                 </div>
                 <div class="card-body p-0">
+                    <div id="transcribeError" class="alert alert-danger m-3 d-none" role="alert"></div>
                     <div id="transcriptionOutput" class="transcription-container">
                         <div class="text-center py-5">
                             <i class="bi bi-mic-fill text-muted" style="font-size: 3rem;"></i>
@@ -343,6 +344,10 @@
 
 {% block scripts %}
 {{ super() }}
+<!-- Data provider for JS -->
+<div id="transcribe-root"
+     data-upload-url="{{ url_for('transcribe') }}"
+     data-status-url-template="{{ url_for('transcription_status', transcript_id='__ID__') }}"></div>
 <script src="{{ url_for('static', filename='js/transcribe.js') }}"></script>
 <script src="{{ url_for('static', filename='js/case-creation.js') }}"></script>
 {% endblock %}

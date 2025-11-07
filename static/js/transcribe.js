@@ -10,10 +10,15 @@ let recordingStartTime = null;
 let timerInterval = null;
 let currentTranscriptId = null;
 let currentTranscriptText = '';
+let uploadUrl = '/transcribe';
+let statusUrlTemplate = '/transcribe/status/__ID__';
 
 // DOM Elements (initialized on load)
 let recordButton, recordingTimer, transcriptionOutput, createCaseBtn;
-let uploadAudioBtn, audioFileInput, clearTranscriptionBtn, downloadTextBtn;
+let audioUpload, transcribeButton, clearTranscriptionBtn, downloadTextBtn;
+let cancelBtn, transcribeErrorBox, noiseReductionToggle, autoPunctuationToggle;
+let currentController = null;
+let cancelRequested = false;
 
 /**
  * Initialize the application
@@ -24,19 +29,22 @@ document.addEventListener('DOMContentLoaded', function() {
     recordingTimer = document.getElementById('recordingTimer');
     transcriptionOutput = document.getElementById('transcriptionOutput');
     createCaseBtn = document.getElementById('createCaseBtn');
-    uploadAudioBtn = document.getElementById('uploadAudioBtn');
-    audioFileInput = document.getElementById('audioFileInput');
+    audioUpload = document.getElementById('audioUpload');
+    transcribeButton = document.getElementById('transcribeButton');
     clearTranscriptionBtn = document.getElementById('clearTranscriptionBtn');
     downloadTextBtn = document.getElementById('downloadTextBtn');
+    cancelBtn = document.getElementById('cancelTranscriptionBtn');
+    transcribeErrorBox = document.getElementById('transcribeError');
+    noiseReductionToggle = document.getElementById('noiseReduction');
+    autoPunctuationToggle = document.getElementById('autoPunctuation');
     
     // Set up event listeners
     if (recordButton) {
         recordButton.addEventListener('click', toggleRecording);
     }
     
-    if (uploadAudioBtn && audioFileInput) {
-        uploadAudioBtn.addEventListener('click', () => audioFileInput.click());
-        audioFileInput.addEventListener('change', handleFileUpload);
+    if (audioUpload) {
+        audioUpload.addEventListener('change', handleFileUpload);
     }
     
     if (clearTranscriptionBtn) {
@@ -51,7 +59,39 @@ document.addEventListener('DOMContentLoaded', function() {
         createCaseBtn.addEventListener('click', showCreateCaseModal);
     }
     
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', () => {
+            cancelRequested = true;
+            if (currentController) {
+                try { currentController.abort(); } catch(e) {}
+            }
+            cancelBtn.classList.add('d-none');
+            showTranscriptionStatus('Cancelled');
+        });
+    }
+    
+    // Transcribe button uploads selected file if present
+    if (transcribeButton) {
+        transcribeButton.addEventListener('click', async () => {
+            if (audioUpload && audioUpload.files && audioUpload.files[0]) {
+                await uploadAudio(audioUpload.files[0]);
+                audioUpload.value = '';
+            } else {
+                showAlert('Please upload a file or record audio first.', 'warning');
+            }
+        });
+    }
+
     console.log('Transcription interface initialized');
+
+    // Load URLs from data provider if present
+    const root = document.getElementById('transcribe-root');
+    if (root) {
+        const u = root.getAttribute('data-upload-url');
+        const s = root.getAttribute('data-status-url-template');
+        if (u) uploadUrl = u;
+        if (s) statusUrlTemplate = s;
+    }
 });
 
 /**
@@ -212,15 +252,21 @@ function updateRecordingUI(state) {
  * Upload audio file
  */
 async function uploadAudio(audioBlob) {
+    clearError(); cancelRequested = false; currentController = new AbortController();
     const formData = new FormData();
     formData.append('audio_file', audioBlob, `recording_${Date.now()}.webm`);
+    // Pass UI settings
+    if (noiseReductionToggle) formData.append('noise_reduction', noiseReductionToggle.checked ? '1' : '0');
+    if (autoPunctuationToggle) formData.append('auto_punctuation', autoPunctuationToggle.checked ? '1' : '0');
     
     try {
         showTranscriptionStatus('Uploading audio...');
+        if (cancelBtn) cancelBtn.classList.remove('d-none');
         
-        const response = await fetch('/transcribe', {
+        const response = await fetch(uploadUrl, {
             method: 'POST',
-            body: formData
+            body: formData,
+            signal: currentController.signal
         });
         
         if (!response.ok) {
@@ -236,15 +282,19 @@ async function uploadAudio(audioBlob) {
         if (data.transcript_id) {
             currentTranscriptId = data.transcript_id;
             showTranscriptionStatus('Transcribing audio...');
-            pollTranscriptionStatus(data.transcript_id);
+            await pollTranscriptionStatus(data.transcript_id);
         } else {
             throw new Error('No transcript ID received');
         }
         
     } catch (error) {
-        console.error('Upload error:', error);
-        showAlert('Failed to upload audio: ' + error.message, 'danger');
-        showTranscriptionStatus('Upload failed. Please try again.');
+        if (error.name === 'AbortError') {
+            showTranscriptionStatus('Cancelled');
+        } else {
+            console.error('Upload error:', error);
+            showError('Failed to upload audio: ' + (error.message || 'Unknown error'));
+            showTranscriptionStatus('Upload failed. Please try again.');
+        }
     }
 }
 
@@ -256,8 +306,8 @@ async function handleFileUpload(event) {
     if (!file) return;
     
     // Validate file type
-    const validTypes = ['audio/webm', 'audio/wav', 'audio/mp3', 'audio/mpeg', 'audio/ogg'];
-    if (!validTypes.includes(file.type) && !file.name.match(/\.(webm|wav|mp3|ogg)$/i)) {
+    const validTypes = ['audio/webm', 'audio/wav', 'audio/mp3', 'audio/mpeg', 'audio/ogg', 'audio/mp4', 'audio/x-m4a', 'audio/aac'];
+    if (!validTypes.includes(file.type) && !file.name.match(/\.(webm|wav|mp3|ogg|m4a|aac|mp4)$/i)) {
         showAlert('Please upload a valid audio file (WebM, WAV, MP3, or OGG)', 'warning');
         return;
     }
@@ -281,10 +331,12 @@ async function handleFileUpload(event) {
 async function pollTranscriptionStatus(transcriptId) {
     const maxAttempts = 120; // 10 minutes max (5 second intervals)
     let attempts = 0;
+    currentController = new AbortController();
     
     const poll = async () => {
         try {
-            const response = await fetch(`/transcribe/status/${transcriptId}`);
+            const statusUrl = statusUrlTemplate.replace('__ID__', transcriptId);
+            const response = await fetch(statusUrl, { signal: currentController.signal });
             
             if (!response.ok) {
                 throw new Error(`Status check failed: ${response.statusText}`);
@@ -294,6 +346,7 @@ async function pollTranscriptionStatus(transcriptId) {
             
             if (data.status === 'completed') {
                 handleTranscriptionComplete(data);
+                if (cancelBtn) cancelBtn.classList.add('d-none');
                 return;
             } else if (data.status === 'error') {
                 throw new Error(data.error || 'Transcription failed');
@@ -316,9 +369,14 @@ async function pollTranscriptionStatus(transcriptId) {
             }
             
         } catch (error) {
-            console.error('Polling error:', error);
-            showAlert('Transcription failed: ' + error.message, 'danger');
-            showTranscriptionStatus('Transcription failed. Please try again.');
+            if (error.name === 'AbortError' || cancelRequested) {
+                showTranscriptionStatus('Cancelled');
+            } else {
+                console.error('Polling error:', error);
+                showError('Transcription failed: ' + (error.message || 'Unknown error'));
+                showTranscriptionStatus('Transcription failed. Please try again.');
+            }
+            if (cancelBtn) cancelBtn.classList.add('d-none');
         }
     };
     
@@ -421,6 +479,18 @@ function showTranscriptionStatus(message) {
             <p class="text-muted">${escapeHtml(message)}</p>
         </div>
     `;
+}
+
+function showError(message) {
+    if (!transcribeErrorBox) return;
+    transcribeErrorBox.textContent = message;
+    transcribeErrorBox.classList.remove('d-none');
+}
+
+function clearError() {
+    if (!transcribeErrorBox) return;
+    transcribeErrorBox.textContent = '';
+    transcribeErrorBox.classList.add('d-none');
 }
 
 /**

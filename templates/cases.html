@@ -221,10 +221,90 @@
                         </div>
                         <div class="col-md-6 mb-3">
                             <label for="case_type" class="form-label">Case Type</label>
-                            <select class="form-select" id="case_type" name="case_type" required>
-                                {% for ct in ['personal_injury','family_law','criminal_defense','business_law','real_estate','estate_planning','other'] %}
-                                    <option value="{{ ct }}">{{ ct.replace('_',' ')|title }}</option>
-                                {% endfor %}
+                            <select class="form-select select2" id="case_type" name="case_type" required>
+                                <optgroup label="Personal Injury">
+                                    <option value="personal_injury">Personal Injury</option>
+                                    <option value="slip_and_fall">Slip And Fall</option>
+                                    <option value="car_accident">Car Accident</option>
+                                    <option value="medical_malpractice">Medical Malpractice</option>
+                                    <option value="wrongful_death">Wrongful Death</option>
+                                    <option value="product_liability">Product Liability</option>
+                                    <option value="workers_compensation">Workers Compensation</option>
+                                </optgroup>
+                                <optgroup label="Family Law">
+                                    <option value="family_law">Family Law</option>
+                                    <option value="divorce">Divorce</option>
+                                    <option value="child_custody">Child Custody</option>
+                                    <option value="adoption">Adoption</option>
+                                    <option value="domestic_violence">Domestic Violence</option>
+                                </optgroup>
+                                <optgroup label="Criminal Defense">
+                                    <option value="criminal_defense">Criminal Defense</option>
+                                    <option value="dui">DUI</option>
+                                    <option value="drug_offenses">Drug Offenses</option>
+                                    <option value="white_collar">White Collar</option>
+                                </optgroup>
+                                <optgroup label="Employment Law">
+                                    <option value="employment_law">Employment Law</option>
+                                    <option value="wrongful_termination">Wrongful Termination</option>
+                                    <option value="workplace_harassment">Workplace Harassment</option>
+                                    <option value="wage_and_hour">Wage And Hour</option>
+                                </optgroup>
+                                <optgroup label="Real Estate">
+                                    <option value="real_estate">Real Estate</option>
+                                    <option value="landlord_tenant">Landlord Tenant</option>
+                                    <option value="foreclosure">Foreclosure</option>
+                                    <option value="property_disputes">Property Disputes</option>
+                                    <option value="construction_law">Construction Law</option>
+                                </optgroup>
+                                <optgroup label="Estate & Probate">
+                                    <option value="estate_planning">Estate Planning</option>
+                                    <option value="probate">Probate</option>
+                                    <option value="trusts">Trusts</option>
+                                    <option value="guardianship">Guardianship</option>
+                                </optgroup>
+                                <optgroup label="Bankruptcy">
+                                    <option value="bankruptcy">Bankruptcy</option>
+                                    <option value="chapter_7">Chapter 7 (Liquidation)</option>
+                                    <option value="chapter_11">Chapter 11 (Reorganization - Businesses)</option>
+                                    <option value="chapter_13">Chapter 13 (Wage Earner Plan)</option>
+                                </optgroup>
+                                <optgroup label="Immigration">
+                                    <option value="immigration">Immigration</option>
+                                    <option value="deportation_defense">Deportation Defense</option>
+                                    <option value="asylum">Asylum</option>
+                                    <option value="family_based_immigration">Family Based Immigration</option>
+                                </optgroup>
+                                <optgroup label="Intellectual Property">
+                                    <option value="intellectual_property">Intellectual Property</option>
+                                    <option value="trademark">Trademark</option>
+                                    <option value="patent">Patent</option>
+                                    <option value="copyright">Copyright</option>
+                                </optgroup>
+                                <optgroup label="Regulatory & Others">
+                                    <option value="tax_law">Tax Law</option>
+                                    <option value="civil_rights">Civil Rights</option>
+                                    <option value="education_law">Education Law</option>
+                                    <option value="elder_law">Elder Law</option>
+                                    <option value="environmental_law">Environmental Law</option>
+                                    <option value="insurance_law">Insurance Law</option>
+                                    <option value="maritime_law">Maritime Law</option>
+                                    <option value="aviation_law">Aviation Law</option>
+                                    <option value="securities_law">Securities Law</option>
+                                    <option value="class_action">Class Action</option>
+                                    <option value="mass_tort">Mass Tort</option>
+                                    <option value="consumer_protection">Consumer Protection</option>
+                                    <option value="privacy_data">Privacy Data</option>
+                                    <option value="cybersecurity">Cybersecurity</option>
+                                    <option value="municipal_law">Municipal Law</option>
+                                    <option value="government_contracts">Government Contracts</option>
+                                    <option value="appeals">Appeals</option>
+                                    <option value="mediation">Mediation</option>
+                                    <option value="arbitration">Arbitration</option>
+                                </optgroup>
+                                <optgroup label="Other">
+                                    <option value="other">Other</option>
+                                </optgroup>
                             </select>
                         </div>
                     </div>
