@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block title %}Time Entries{% endblock %}
+{% block page_title %}Time Entries{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">All Time Entries</div>
+  <div class="card-body">
+    <table class="table table-striped">
+      <thead>
+        <tr>
+          <th>#</th><th>Date</th><th>User</th><th>Case</th><th>Minutes</th><th>Rate</th><th>Amount</th><th>Activity</th><th>Invoice</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for te in entries %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ te.date|format_date }}</td>
+          <td>{{ te.user.first_name }} {{ te.user.last_name }}</td>
+          <td>{{ te.case.title }}</td>
+          <td>{{ te.duration_minutes }}</td>
+          <td>{{ te.hourly_rate|format_currency }}</td>
+          <td>{{ te.amount|format_currency }}</td>
+          <td>{{ te.activity_type }}</td>
+          <td>{% if te.invoice %}{{ te.invoice.invoice_number }}{% else %}-{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="9" class="text-center text-muted">No time entries yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

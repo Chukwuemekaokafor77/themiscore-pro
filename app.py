@@ -8,18 +8,24 @@ from functools import wraps
 from dotenv import load_dotenv
 from flask_migrate import Migrate
 import mimetypes
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+except Exception:  # pragma: no cover
+    BackgroundScheduler = None
+import smtplib
+import ssl
 
 # Support both package and script imports
 try:
     # Package-relative imports (when FLASK_APP=law_firm_intake.app)
-    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft
+    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft, ClientUser, ClientMessage, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, BillingRate, CalendarEvent, NotificationPreference
     from .utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from .filters import time_ago, format_date, format_currency, pluralize
     from .services.stt import STTService
     from .services.letter_templates import LetterTemplateService
 except ImportError:  # pragma: no cover
     # Fallback for running as a script (python app.py)
-    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft
+    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Lawyer, Referral, Transcript, Deadline, EmailDraft, ClientUser, ClientMessage, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, BillingRate, CalendarEvent, NotificationPreference
     from utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from filters import time_ago, format_date, format_currency, pluralize
     from services.stt import STTService
@@ -92,6 +98,92 @@ ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'jpeg', 'png',
 db.init_app(app)
 migrate = Migrate(app, db)
 
+# ---------------- Email sending (SMTP with mock fallback) ---------------- #
+SMTP_HOST = os.getenv('SMTP_HOST')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+SMTP_USER = os.getenv('SMTP_USER')
+SMTP_PASS = os.getenv('SMTP_PASS')
+SMTP_FROM = os.getenv('SMTP_FROM') or os.getenv('SMTP_USER')
+
+def _send_email(to_email: str, subject: str, body: str):
+    if SMTP_HOST and SMTP_FROM:
+        try:
+            msg = f"From: {SMTP_FROM}\r\nTo: {to_email}\r\nSubject: {subject}\r\n\r\n{body}"
+            context = ssl.create_default_context()
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+                server.ehlo()
+                try:
+                    server.starttls(context=context)
+                    server.ehlo()
+                except Exception:
+                    pass
+                if SMTP_USER and SMTP_PASS:
+                    server.login(SMTP_USER, SMTP_PASS)
+                server.sendmail(SMTP_FROM, [to_email] if to_email else [SMTP_FROM], msg)
+            current_app.logger.info(f"[SMTP EMAIL] To={to_email or 'n/a'} | Subject={subject}")
+            return
+        except Exception as e:
+            current_app.logger.error(f"SMTP send failed: {str(e)}; falling back to mock.")
+    current_app.logger.info(f"[MOCK EMAIL] To={to_email or 'n/a'} | Subject={subject} | Body={body}")
+
+def _check_calendar_reminders():
+    with app.app_context():
+        now = datetime.utcnow()
+        window = now + timedelta(minutes=1)
+        # Upcoming events; we'll compute per-event reminder window and skip already-notified
+        events = db.session.query(CalendarEvent).filter(
+            CalendarEvent.reminder_minutes_before > 0,
+            CalendarEvent.start_at != None
+        ).all()
+        for ev in events:
+            try:
+                if not ev.start_at:
+                    continue
+                # Preferences override minutes_before if present (by client)
+                pref = None
+                if ev.client_id:
+                    pref = NotificationPreference.query.filter_by(client_id=ev.client_id).first()
+                minutes_before = pref.minutes_before if pref and pref.minutes_before is not None else ev.reminder_minutes_before
+                email_enabled = pref.email_enabled if pref is not None else True
+                if not email_enabled:
+                    continue
+                remind_at = ev.start_at - timedelta(minutes=minutes_before)
+                if remind_at <= window and remind_at >= now:
+                    # Skip if already notified recently for this window
+                    if ev.last_notified_at and ev.last_notified_at >= remind_at:
+                        continue
+                    # Derive recipient: client's email if available
+                    to_email = ev.client.email if getattr(ev, 'client', None) and ev.client and ev.client.email else None
+                    subject = f"Reminder: {ev.title} at {ev.start_at.strftime('%Y-%m-%d %H:%M')}"
+                    body = f"Event: {ev.title}\nCase: {ev.case.title if ev.case else '-'}\nLocation: {ev.location or '-'}"
+                    _send_email(to_email, subject, body)
+                    ev.last_notified_at = now
+                    db.session.add(ev)
+                    db.session.commit()
+            except Exception as e:
+                current_app.logger.error(f"Reminder job error for event {getattr(ev, 'id', '?')}: {str(e)}")
+
+_scheduler = None
+def _start_scheduler_once():
+    global _scheduler
+    if _scheduler is not None:
+        return
+    if BackgroundScheduler is None:
+        app.logger.warning('APScheduler not installed; reminder job disabled.')
+        return
+    _scheduler = BackgroundScheduler()
+    _scheduler.add_job(_check_calendar_reminders, 'interval', minutes=1, id='calendar_reminders')
+    _scheduler.start()
+
+# Start scheduler only on the reloader main process
+if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+    try:
+        _start_scheduler_once()
+        if BackgroundScheduler:
+            app.logger.info('APScheduler started for calendar reminders.')
+    except Exception as e:
+        app.logger.error(f'Failed to start scheduler: {str(e)}')
+
 # Register template filters
 app.jinja_env.filters['time_ago'] = time_ago
 app.jinja_env.filters['format_date'] = format_date
@@ -121,6 +213,22 @@ def login_required(f):
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# -------- Client Portal auth helpers (must be defined before portal routes) -------- #
+def portal_login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'client_user_id' not in session:
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+def _get_portal_client_id():
+    cu_id = session.get('client_user_id')
+    if not cu_id:
+        return None
+    cu = db.session.get(ClientUser, cu_id)
+    return cu.client_id if cu else None
 
 # Create database tables
 with app.app_context():
@@ -523,6 +631,384 @@ def documents():
     
     return render_template('documents.html', documents=documents)
 
+# ---- Billing Routes ----
+@app.route('/billing/invoices')
+@login_required
+@requires_auth
+def billing_invoices():
+    return redirect(url_for('billing'))
+
+@app.route('/billing/time-entries')
+@login_required
+@requires_auth
+def billing_time_entries():
+    return redirect(url_for('billing'))
+
+@app.route('/billing/expenses')
+@login_required
+@requires_auth
+def billing_expenses():
+    return redirect(url_for('billing'))
+
+@app.route('/billing')
+@login_required
+@requires_auth
+def billing():
+    invoices = Invoice.query.options(db.joinedload(Invoice.client), db.joinedload(Invoice.case)).order_by(Invoice.created_at.desc()).all()
+    entries = TimeEntry.query.options(db.joinedload(TimeEntry.user), db.joinedload(TimeEntry.case), db.joinedload(TimeEntry.invoice)).order_by(TimeEntry.created_at.desc()).all()
+    expenses = Expense.query.options(db.joinedload(Expense.user), db.joinedload(Expense.case), db.joinedload(Expense.invoice)).order_by(Expense.created_at.desc()).all()
+    return render_template('billing.html', invoices=invoices, entries=entries, expenses=expenses)
+
+# ---- Client Portal (read-only demo) ----
+@app.route('/portal/invoices')
+@portal_login_required
+def portal_invoices():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    invoices = Invoice.query.options(db.joinedload(Invoice.client), db.joinedload(Invoice.case)).filter(Invoice.client_id==client_id).order_by(Invoice.created_at.desc()).all()
+    return render_template('portal_invoices.html', invoices=invoices)
+
+@app.route('/portal/payments')
+@portal_login_required
+def portal_payments():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    payments = Payment.query.join(Invoice, Payment.invoice_id==Invoice.id).filter(Invoice.client_id==client_id).options(db.joinedload(Payment.invoice)).order_by(Payment.payment_date.desc()).all()
+    return render_template('portal_payments.html', payments=payments)
+
+@app.route('/portal/documents')
+@portal_login_required
+def portal_documents():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    accesses = ClientDocumentAccess.query.filter_by(client_id=client_id).options(db.joinedload(ClientDocumentAccess.document), db.joinedload(ClientDocumentAccess.client)).order_by(ClientDocumentAccess.granted_at.desc()).all()
+    return render_template('portal_documents.html', accesses=accesses)
+
+# ---- Payments / Trust / Invoice Ops ----
+@app.route('/billing/invoices/<int:invoice_id>/pay-mock', methods=['POST'])
+@login_required
+@requires_auth
+def invoice_pay_mock(invoice_id):
+    invoice = db.session.get(Invoice, invoice_id)
+    if invoice is None:
+        abort(404)
+    amount = float(request.form.get('amount') or invoice.balance_due or 0)
+    if amount <= 0:
+        flash('Invalid amount.', 'warning')
+        return redirect(url_for('billing'))
+    try:
+        pay = Payment(
+            invoice_id=invoice.id,
+            payment_date=datetime.utcnow().date(),
+            amount=amount,
+            payment_method='online',
+            status='completed'
+        )
+        db.session.add(pay)
+        db.session.flush()
+        invoice.add_payment(amount)
+        db.session.commit()
+        flash('Payment recorded (mock).', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Payment failed: {str(e)}', 'danger')
+    return redirect(url_for('billing'))
+
+@app.route('/billing/invoices/<int:invoice_id>/payments', methods=['POST'])
+@login_required
+@requires_auth
+def post_payment(invoice_id):
+    invoice = db.session.get(Invoice, invoice_id)
+    if invoice is None:
+        abort(404)
+    try:
+        amount = float(request.form.get('amount'))
+        method = request.form.get('payment_method') or 'check'
+        ref = request.form.get('reference_number')
+        p = Payment(invoice_id=invoice.id, payment_date=datetime.utcnow().date(), amount=amount, payment_method=method, reference_number=ref, status='completed')
+        db.session.add(p)
+        db.session.flush()
+        invoice.add_payment(amount)
+        db.session.commit()
+        flash('Payment posted.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Failed to post payment: {str(e)}', 'danger')
+    return redirect(url_for('billing'))
+
+@app.route('/billing/trust/transfer', methods=['POST'])
+@login_required
+@requires_auth
+def trust_transfer():
+    try:
+        client_id = int(request.form.get('client_id'))
+        case_id = request.form.get('case_id')
+        case_id = int(case_id) if case_id else None
+        amount = float(request.form.get('amount'))
+        description = request.form.get('description') or 'Trust transfer'
+        # Compute balance_after naive (for demo): sum deposits - withdrawals
+        prev = db.session.query(db.func.coalesce(db.func.sum(TrustAccount.amount), 0)).filter_by(client_id=client_id).scalar() or 0
+        balance_after = prev + amount
+        ta = TrustAccount(client_id=client_id, case_id=case_id, transaction_date=datetime.utcnow().date(), transaction_type='transfer', amount=amount, balance_after=balance_after, description=description)
+        db.session.add(ta)
+        db.session.commit()
+        flash('Trust transfer recorded.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Trust transfer failed: {str(e)}', 'danger')
+    return redirect(url_for('billing'))
+
+@app.route('/billing/invoices/<int:invoice_id>/pdf')
+@login_required
+@requires_auth
+def invoice_pdf(invoice_id):
+    invoice = db.session.get(Invoice, invoice_id)
+    if invoice is None:
+        abort(404)
+    # Render simple HTML and save as .html (mock PDF)
+    html = render_template('invoice_pdf.html', invoice=invoice)
+    pdf_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'invoices')
+    os.makedirs(pdf_dir, exist_ok=True)
+    pdf_path = os.path.join(pdf_dir, f"{invoice.invoice_number}.pdf")
+    with open(pdf_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    invoice.pdf_generated = True
+    invoice.pdf_path = pdf_path
+    db.session.commit()
+    flash('Invoice PDF generated (mock).', 'info')
+    return send_file(pdf_path, as_attachment=True, download_name=f"{invoice.invoice_number}.pdf")
+
+@app.route('/billing/invoices/<int:invoice_id>/email')
+@login_required
+@requires_auth
+def invoice_email(invoice_id):
+    invoice = db.session.get(Invoice, invoice_id)
+    if invoice is None:
+        abort(404)
+    to_email = invoice.client.email if invoice.client and invoice.client.email else None
+    subject = f"Invoice {invoice.invoice_number}"
+    body = f"Dear {invoice.client.first_name if invoice.client else 'Client'},\nYour invoice total is {invoice.total_amount}."
+    _send_email(to_email, subject, body)
+    flash('Invoice emailed (mock/SMTP).', 'success')
+    return redirect(url_for('billing'))
+
+# ---- Calendar Routes ----
+@app.route('/calendar')
+@login_required
+@requires_auth
+def calendar():
+    events = CalendarEvent.query.options(
+        db.joinedload(CalendarEvent.case),
+        db.joinedload(CalendarEvent.client)
+    ).order_by(CalendarEvent.start_at.asc()).all()
+    return render_template('calendar.html', events=events)
+
+def _ics_escape(text: str) -> str:
+    return (text or '').replace('\\', '\\\\').replace('\n', '\\n').replace(',', '\\,').replace(';', '\\;')
+
+@app.route('/calendar/ics')
+@login_required
+@requires_auth
+def calendar_ics():
+    events = CalendarEvent.query.order_by(CalendarEvent.start_at.asc()).all()
+    lines = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//LegalIntake Pro//Calendar//EN'
+    ]
+    for ev in events:
+        dtstart = ev.start_at.strftime('%Y%m%dT%H%M%SZ') if ev.start_at else ''
+        dtend = ev.end_at.strftime('%Y%m%dT%H%M%SZ') if ev.end_at else ''
+        lines.extend([
+            'BEGIN:VEVENT',
+            f'SUMMARY:{_ics_escape(ev.title)}',
+            f'DESCRIPTION:{_ics_escape(ev.description or "")}',
+            f'DTSTART:{dtstart}',
+            f'DTEND:{dtend}' if dtend else f'DURATION:PT60M',
+            f'LOCATION:{_ics_escape(ev.location or "")}',
+            'END:VEVENT'
+        ])
+    lines.append('END:VCALENDAR')
+    ics_content = '\r\n'.join(lines)
+    return Response(ics_content, mimetype='text/calendar')
+
+@app.route('/calendar/add', methods=['GET', 'POST'])
+@login_required
+@requires_auth
+def add_calendar_event():
+    if request.method == 'POST':
+        try:
+            title = request.form.get('title')
+            description = request.form.get('description')
+            location = request.form.get('location')
+            all_day = request.form.get('all_day') == 'on'
+            reminder = int(request.form.get('reminder_minutes_before') or 0)
+            case_id = request.form.get('case_id') or None
+            client_id = request.form.get('client_id') or None
+
+            start_date = request.form.get('start_date')
+            start_time = request.form.get('start_time') or '09:00'
+            end_date = request.form.get('end_date') or start_date
+            end_time = request.form.get('end_time') or ''
+
+            # Compose datetimes
+            if all_day:
+                start_at = datetime.strptime(start_date, '%Y-%m-%d')
+                end_at = None
+            else:
+                start_at = datetime.strptime(f"{start_date} {start_time}", '%Y-%m-%d %H:%M')
+                end_at = datetime.strptime(f"{end_date} {end_time}", '%Y-%m-%d %H:%M') if end_time else None
+
+            ev = CalendarEvent(
+                title=title,
+                description=description,
+                start_at=start_at,
+                end_at=end_at,
+                all_day=all_day,
+                location=location,
+                case_id=int(case_id) if case_id else None,
+                client_id=int(client_id) if client_id else None,
+                created_by_id=session.get('user_id'),
+                reminder_minutes_before=reminder,
+                status='scheduled'
+            )
+            db.session.add(ev)
+            db.session.commit()
+            # Redirect
+            if case_id:
+                return redirect(url_for('view_case', case_id=case_id))
+            return redirect(url_for('calendar'))
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error creating event: {str(e)}', 'danger')
+    # GET
+    cases = Case.query.order_by(Case.created_at.desc()).all()
+    clients = Client.query.order_by(Client.last_name, Client.first_name).all()
+    return render_template('add_event.html', cases=cases, clients=clients, selected_case_id=None)
+
+@app.route('/cases/<int:case_id>/events/add', methods=['GET', 'POST'])
+@login_required
+@requires_auth
+def add_case_event(case_id):
+    if request.method == 'POST':
+        return add_calendar_event()
+    cases = Case.query.order_by(Case.created_at.desc()).all()
+    clients = Client.query.order_by(Client.last_name, Client.first_name).all()
+    return render_template('add_event.html', cases=cases, clients=clients, selected_case_id=case_id)
+
+# ---- Settings and OAuth stubs ----
+@app.route('/settings', methods=['GET'])
+@login_required
+@requires_auth
+def settings():
+    # Determine provider connection status per current user (session-based)
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    from models import OAuthAccount
+    google_acc = OAuthAccount.query.filter_by(user_id=user_id, provider='google', status='connected').first()
+    ms_acc = OAuthAccount.query.filter_by(user_id=user_id, provider='microsoft', status='connected').first()
+    def acc_details(acc):
+        if not acc:
+            return None
+        return {
+            'connected_at': acc.connected_at.strftime('%Y-%m-%d %H:%M') if acc.connected_at else None,
+            'expires_at': acc.expires_at.strftime('%Y-%m-%d %H:%M') if acc.expires_at else None,
+            'scopes': acc.scopes
+        }
+    # Notification preferences (user-level)
+    from models import NotificationPreference
+    user_pref = NotificationPreference.query.filter_by(user_id=user_id).first()
+    providers = {
+        'google': {
+            'connected': bool(google_acc),
+            'redirect_url': url_for('auth_start', provider='google'),
+            'details': acc_details(google_acc)
+        },
+        'microsoft': {
+            'connected': bool(ms_acc),
+            'redirect_url': url_for('auth_start', provider='microsoft'),
+            'details': acc_details(ms_acc)
+        }
+    }
+    return render_template('settings.html', providers=providers, user_pref=user_pref)
+
+@app.route('/auth/<provider>/start')
+@login_required
+@requires_auth
+def auth_start(provider):
+    if provider not in ('google', 'microsoft'):
+        abort(404)
+    # Stub: immediately redirect to callback as if provider authorized
+    return redirect(url_for('auth_callback', provider=provider, code='mock_code'))
+
+@app.route('/auth/<provider>/callback')
+@login_required
+@requires_auth
+def auth_callback(provider):
+    if provider not in ('google', 'microsoft'):
+        abort(404)
+    from models import OAuthAccount
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    acc = OAuthAccount.query.filter_by(user_id=user_id, provider=provider).first()
+    if not acc:
+        acc = OAuthAccount(user_id=user_id, provider=provider)
+        db.session.add(acc)
+    acc.status = 'connected'
+    acc.access_token = 'mock_access_token'
+    acc.refresh_token = 'mock_refresh_token'
+    acc.expires_at = datetime.utcnow() + timedelta(hours=1)
+    acc.scopes = 'calendar.read,calendar.write'
+    db.session.commit()
+    flash(f'{provider.title()} connected (mock).', 'success')
+    return redirect(url_for('settings'))
+
+@app.route('/settings/notifications', methods=['POST'])
+@login_required
+@requires_auth
+def save_notifications():
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    from models import NotificationPreference
+    try:
+        minutes_before = int(request.form.get('minutes_before') or 60)
+        email_enabled = True if request.form.get('email_enabled') == 'on' else False
+        pref = NotificationPreference.query.filter_by(user_id=user_id).first()
+        if not pref:
+            pref = NotificationPreference(user_id=user_id)
+            db.session.add(pref)
+        pref.minutes_before = minutes_before
+        pref.email_enabled = email_enabled
+        db.session.commit()
+        flash('Notification preferences saved.', 'success')
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Failed to save preferences: {str(e)}', 'danger')
+    return redirect(url_for('settings'))
+
+@app.route('/auth/<provider>/disconnect', methods=['POST'])
+@login_required
+@requires_auth
+def auth_disconnect(provider):
+    if provider not in ('google', 'microsoft'):
+        abort(404)
+    from models import OAuthAccount
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    acc = OAuthAccount.query.filter_by(user_id=user_id, provider=provider).first()
+    if acc:
+        acc.status = 'revoked'
+        db.session.commit()
+    flash(f'{provider.title()} disconnected.', 'info')
+    return redirect(url_for('settings'))
+
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -565,6 +1051,28 @@ def transcribe():
                 app.logger.error(f"Error processing audio file: {str(e)}")
                 return jsonify({'error': str(e)}), 500
     return render_template('transcribe.html')
+
+# -------- Client Portal Login/Logout -------- #
+@app.route('/portal/login', methods=['GET', 'POST'])
+def portal_login():
+    if request.method == 'POST':
+        email = request.form.get('email','').strip().lower()
+        password = request.form.get('password','')
+        cu = ClientUser.query.filter(db.func.lower(ClientUser.email)==email).first()
+        if cu and cu.check_password(password):
+            session['client_user_id'] = cu.id
+            session.permanent = True
+            flash('Signed in to client portal.', 'success')
+            return redirect(url_for('portal_invoices'))
+        else:
+            flash('Invalid portal credentials', 'danger')
+    return render_template('portal_login.html')
+
+@app.route('/portal/logout')
+def portal_logout():
+    session.pop('client_user_id', None)
+    flash('Signed out of client portal.', 'info')
+    return redirect(url_for('portal_login'))
 
 # ------- Scenario Automation Helpers ------- #
 def _write_document(case_id, filename, content, uploaded_by_id):

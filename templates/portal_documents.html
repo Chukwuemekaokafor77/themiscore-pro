@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block title %}Client Portal - Documents{% endblock %}
+{% block page_title %}Client Portal · Documents{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span>Accessible Documents</span>
+    <a href="{{ url_for('portal_invoices') }}" class="btn btn-sm btn-outline-secondary">Invoices</a>
+  </div>
+  <div class="card-body">
+    <table class="table table-striped table-sm">
+      <thead>
+        <tr>
+          <th>#</th><th>Document</th><th>Description</th><th>Granted</th><th>View</th><th>Download</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in accesses %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ a.document.name if a.document else '-' }}</td>
+          <td>{{ a.document.description if a.document and a.document.description else '-' }}</td>
+          <td>{{ a.granted_at|format_date }}</td>
+          <td>{% if a.can_view and a.document %}<a href="{{ url_for('view_document', document_id=a.document.id) }}" target="_blank" class="btn btn-sm btn-outline-primary">View</a>{% else %}-{% endif %}</td>
+          <td>{% if a.can_download and a.document %}<a href="{{ url_for('download_document', document_id=a.document.id) }}" class="btn btn-sm btn-outline-secondary">Download</a>{% else %}-{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="text-center text-muted">No documents available.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

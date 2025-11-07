@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block title %}Invoices{% endblock %}
+{% block page_title %}Invoices{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">All Invoices</div>
+  <div class="card-body">
+    <table class="table table-striped">
+      <thead>
+        <tr>
+          <th>#</th><th>Invoice #</th><th>Client</th><th>Case</th><th>Issue</th><th>Due</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for inv in invoices %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ inv.invoice_number }}</td>
+          <td>{{ inv.client.first_name }} {{ inv.client.last_name }}</td>
+          <td>{{ inv.case.title }}</td>
+          <td>{{ inv.issue_date|format_date }}</td>
+          <td>{{ inv.due_date|format_date }}</td>
+          <td>{{ inv.total_amount|format_currency }}</td>
+          <td>{{ inv.amount_paid|format_currency }}</td>
+          <td>{{ inv.balance_due|format_currency }}</td>
+          <td>{{ inv.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10" class="text-center text-muted">No invoices yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

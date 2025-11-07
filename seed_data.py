@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta
 
 from app import app, db
-from models import Client, Case, User
+from models import Client, Case, User, ClientUser, Invoice, TimeEntry, Expense, Deadline, CalendarEvent
 
 FIRST_NAMES = [
     "James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda",
@@ -78,42 +78,151 @@ def seed():
             db.session.flush()
 
         existing = Client.query.count()
-        if existing >= 30:
-            print(f"Clients already seeded ({existing}). Skipping.")
-            return
-
-        # Create 30 clients with unique emails
         clients = []
-        for i in range(30):
-            fn = FIRST_NAMES[i % len(FIRST_NAMES)]
-            ln = LAST_NAMES[i % len(LAST_NAMES)]
-            email = f"{fn.lower()}.{ln.lower()}{i+1}@example.com"
-            c = Client(
-                first_name=fn,
-                last_name=ln,
-                email=email,
-                phone=random_phone(),
-                address=random_address(),
-            )
-            db.session.add(c)
-            clients.append(c)
+        if existing >= 30:
+            # Reuse existing clients, do not return so we can seed portal/billing demo
+            clients = Client.query.order_by(Client.id.asc()).limit(30).all()
+            print(f"Clients already present ({existing}). Reusing first 30.")
+        else:
+            # Create 30 clients with unique emails
+            for i in range(30):
+                fn = FIRST_NAMES[i % len(FIRST_NAMES)]
+                ln = LAST_NAMES[i % len(LAST_NAMES)]
+                email = f"{fn.lower()}.{ln.lower()}{i+1}@example.com"
+                c = Client(
+                    first_name=fn,
+                    last_name=ln,
+                    email=email,
+                    phone=random_phone(),
+                    address=random_address(),
+                )
+                db.session.add(c)
+                clients.append(c)
+            db.session.flush()
+
+        # clients list is populated above, either reused or newly created
+
+        # Ensure there are sample cases for first 5 clients
+        sample_cases = []
+        for i in range(5):
+            cl = clients[i]
+            existing_case = Case.query.filter_by(client_id=cl.id).first()
+            if existing_case:
+                sample_cases.append((cl, existing_case))
+            else:
+                case = Case(
+                    title=CASE_TITLES[i % len(CASE_TITLES)],
+                    description=CASE_DESCRIPTIONS[i % len(CASE_DESCRIPTIONS)],
+                    case_type=CASE_TYPES[i % len(CASE_TYPES)],
+                    status='open',
+                    priority=random.choice(['high', 'medium', 'low']),
+                    client_id=cl.id,
+                    created_by_id=admin.id,
+                )
+                db.session.add(case)
+                sample_cases.append((cl, case))
         db.session.flush()
 
-        # Create a few sample cases for the first 5 clients
-        for i in range(5):
-            case = Case(
-                title=CASE_TITLES[i % len(CASE_TITLES)],
-                description=CASE_DESCRIPTIONS[i % len(CASE_DESCRIPTIONS)],
-                case_type=CASE_TYPES[i % len(CASE_TYPES)],
-                status='open',
-                priority=random.choice(['high', 'medium', 'low']),
-                client_id=clients[i].id,
-                created_by_id=admin.id,
+        # Create a ClientUser for the first client if not exists
+        first_client = clients[0]
+        if not ClientUser.query.filter_by(client_id=first_client.id).first():
+            cu = ClientUser(
+                client_id=first_client.id,
+                email=f"{first_client.first_name.lower()}.{first_client.last_name.lower()}@portal.example.com",
+                portal_access=True,
+                email_verified=True,
             )
-            db.session.add(case)
+            cu.set_password('ClientPass!123')
+            db.session.add(cu)
+
+        # Create a demo Invoice with one TimeEntry and one Expense for the first case
+        first_case = sample_cases[0][1]
+        inv_num = f"INV-{datetime.utcnow().strftime('%Y%m%d')}-001"
+        invoice = Invoice.query.filter_by(invoice_number=inv_num).first()
+        if not invoice:
+            invoice = Invoice(
+                invoice_number=inv_num,
+                case_id=first_case.id,
+                client_id=first_case.client_id,
+                issue_date=datetime.utcnow().date(),
+                due_date=(datetime.utcnow() + timedelta(days=30)).date(),
+                total_amount=0.0
+            )
+            db.session.add(invoice)
+            db.session.flush()
+
+        # Time entry: 1.5 hours @ $200/hr
+        existing_te = TimeEntry.query.filter_by(invoice_id=invoice.id).first()
+        if not existing_te:
+            te = TimeEntry(
+                case_id=first_case.id,
+                user_id=admin.id,
+                date=datetime.utcnow().date(),
+                duration_minutes=90,
+                hourly_rate=200.0,
+                amount=0.0,
+                description='Initial consultation and file setup',
+                activity_type='consultation',
+                billable=True,
+                invoice_id=invoice.id
+            )
+            te.calculate_amount()
+            db.session.add(te)
+
+        # Expense: $35 filing fee
+        existing_ex = Expense.query.filter_by(invoice_id=invoice.id).first()
+        if not existing_ex:
+            ex = Expense(
+                case_id=first_case.id,
+                user_id=admin.id,
+                date=datetime.utcnow().date(),
+                description='Filing fee',
+                category='filing_fees',
+                amount=35.0,
+                billable_to_client=True,
+                invoice_id=invoice.id
+            )
+            db.session.add(ex)
+
+        # Seed sample Deadlines for demo cases (idempotent)
+        for (_cl, cse) in sample_cases:
+            base = datetime.utcnow()
+            demo_deadlines = [
+                ("Evidence retention deadline", base + timedelta(days=7), 'evidence_retention', 'Preserve CCTV and incident reports'),
+                ("Follow-up with adjuster", base + timedelta(days=14), 'adjuster_followup', 'Call insurance adjuster for status'),
+                ("Statute check", base + timedelta(days=45), 'statute_check', 'Confirm applicable statute of limitations'),
+            ]
+            for name, due, source, notes in demo_deadlines:
+                if not Deadline.query.filter_by(case_id=cse.id, name=name).first():
+                    dl = Deadline(case_id=cse.id, name=name, due_date=due, source=source, notes=notes)
+                    db.session.add(dl)
+
+        # Calculate totals
+        invoice.calculate_totals()
+
+        # Seed CalendarEvent from existing Deadlines
+        deadlines = Deadline.query.all()
+        created_events = 0
+        for dl in deadlines:
+            exists = CalendarEvent.query.filter_by(title=dl.name, case_id=dl.case_id, start_at=dl.due_date).first()
+            if not exists:
+                ev = CalendarEvent(
+                    title=dl.name,
+                    description=dl.notes,
+                    start_at=dl.due_date,
+                    end_at=None,
+                    all_day=True,
+                    case_id=dl.case_id,
+                    client_id=Case.query.get(dl.case_id).client_id if dl.case_id else None,
+                    created_by_id=admin.id,
+                    reminder_minutes_before=60,
+                    status='scheduled'
+                )
+                db.session.add(ev)
+                created_events += 1
 
         db.session.commit()
-        print("Seed complete: 30 clients and 5 sample cases created.")
+        print("Seed complete: clients ensured, sample cases ensured, portal user and billing demo ensured. Calendar events created:", created_events)
 
 
 if __name__ == '__main__':

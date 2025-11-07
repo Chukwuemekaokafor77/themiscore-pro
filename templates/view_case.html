@@ -18,6 +18,9 @@
                     <a href="{{ url_for('update_case', case_id=case.id) }}" class="btn btn-sm btn-outline-secondary">
                         <i class="bi bi-pencil"></i> Edit
                     </a>
+                    <a href="{{ url_for('add_case_event', case_id=case.id) }}" class="btn btn-sm btn-outline-success ms-2">
+                        <i class="bi bi-calendar-plus"></i> Add Event
+                    </a>
                 </div>
             </div>
             <div class="card-body">
@@ -65,6 +68,12 @@
                         by {{ case.creator.first_name }} {{ case.creator.last_name }}
                     {% endif %}
                 </small>
+            </div>
+            <div class="card-footer text-end">
+                <a href="{{ url_for('add_case_event', case_id=case.id) }}" class="btn btn-sm btn-outline-success">
+                    <i class="bi bi-calendar-plus"></i> Add Event
+                </a>
+                <a href="{{ url_for('calendar') }}" class="btn btn-sm btn-outline-secondary ms-2">View Calendar</a>
             </div>
         </div>
 

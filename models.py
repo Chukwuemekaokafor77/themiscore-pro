@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+import secrets
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -42,6 +43,22 @@ class User(db.Model):
             'role': self.role,
             'is_active': self.is_active
         }
+
+
+class NotificationPreference(db.Model):
+    """Reminder/notification preferences per user or client."""
+    __tablename__ = 'notification_preference'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'))
+    email_enabled = db.Column(db.Boolean, default=True)
+    minutes_before = db.Column(db.Integer, default=60)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', backref='notification_prefs')
+    client = db.relationship('Client', backref='notification_prefs')
 
 
 class EmailDraft(db.Model):
@@ -432,4 +449,553 @@ class Transcript(db.Model):
             'client_id': self.client_id,
             'case_id': self.case_id,
             'user_id': self.user_id,
+        }
+
+# ==================== CLIENT PORTAL & BILLING MODELS ====================
+
+class ClientUser(db.Model):
+    """Separate authentication for client portal access"""
+    __tablename__ = 'client_user'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False, unique=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+    
+    # Portal settings
+    portal_access = db.Column(db.Boolean, default=True)
+    email_verified = db.Column(db.Boolean, default=False)
+    verification_token = db.Column(db.String(100), unique=True)
+    reset_token = db.Column(db.String(100), unique=True)
+    reset_token_expires = db.Column(db.DateTime)
+    
+    # Activity tracking
+    last_login = db.Column(db.DateTime)
+    last_activity = db.Column(db.DateTime)
+    login_count = db.Column(db.Integer, default=0)
+    
+    # Security
+    failed_login_attempts = db.Column(db.Integer, default=0)
+    locked_until = db.Column(db.DateTime)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    client = db.relationship('Client', backref=db.backref('portal_user', uselist=False))
+    
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+    
+    def generate_verification_token(self):
+        self.verification_token = secrets.token_urlsafe(32)
+        return self.verification_token
+    
+    def generate_reset_token(self):
+        self.reset_token = secrets.token_urlsafe(32)
+        self.reset_token_expires = datetime.utcnow() + timedelta(hours=24)
+        return self.reset_token
+    
+    def is_locked(self):
+        if self.locked_until and self.locked_until > datetime.utcnow():
+            return True
+        return False
+    
+    def record_failed_login(self):
+        self.failed_login_attempts += 1
+        if self.failed_login_attempts >= 5:
+            self.locked_until = datetime.utcnow() + timedelta(minutes=30)
+    
+    def record_successful_login(self):
+        self.failed_login_attempts = 0
+        self.locked_until = None
+        self.last_login = datetime.utcnow()
+        self.login_count += 1
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'email': self.email,
+            'portal_access': self.portal_access,
+            'email_verified': self.email_verified,
+            'last_login': self.last_login.isoformat() if self.last_login else None
+        }
+
+
+class ClientMessage(db.Model):
+    """Secure messaging between client and attorney"""
+    __tablename__ = 'client_message'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    
+    # Sender/Receiver
+    from_client = db.Column(db.Boolean, default=True)  # True if from client, False if from attorney
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'))
+    attorney_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    # Message content
+    subject = db.Column(db.String(200))
+    message = db.Column(db.Text, nullable=False)
+    
+    # Status
+    read = db.Column(db.Boolean, default=False)
+    read_at = db.Column(db.DateTime)
+    
+    # Threading
+    parent_id = db.Column(db.Integer, db.ForeignKey('client_message.id'))
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    case = db.relationship('Case', backref='client_messages')
+    client = db.relationship('Client', backref='messages_sent', foreign_keys=[client_id])
+    attorney = db.relationship('User', backref='client_messages', foreign_keys=[attorney_id])
+    replies = db.relationship('ClientMessage', backref=db.backref('parent', remote_side=[id]))
+    
+    def mark_as_read(self):
+        self.read = True
+        self.read_at = datetime.utcnow()
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'from_client': self.from_client,
+            'subject': self.subject,
+            'message': self.message,
+            'read': self.read,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class ClientDocumentAccess(db.Model):
+    """Track which documents clients can access"""
+    __tablename__ = 'client_document_access'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey('document.id'), nullable=False)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False)
+    
+    # Access control
+    can_view = db.Column(db.Boolean, default=True)
+    can_download = db.Column(db.Boolean, default=True)
+    requires_signature = db.Column(db.Boolean, default=False)
+    signed = db.Column(db.Boolean, default=False)
+    signed_at = db.Column(db.DateTime)
+    
+    # Notifications
+    client_notified = db.Column(db.Boolean, default=False)
+    notification_sent_at = db.Column(db.DateTime)
+    
+    # Tracking
+    view_count = db.Column(db.Integer, default=0)
+    last_viewed = db.Column(db.DateTime)
+    download_count = db.Column(db.Integer, default=0)
+    last_downloaded = db.Column(db.DateTime)
+    
+    granted_at = db.Column(db.DateTime, default=datetime.utcnow)
+    granted_by_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    # Relationships
+    document = db.relationship('Document', backref='client_access')
+    client = db.relationship('Client', backref='document_access')
+    granted_by = db.relationship('User', backref='granted_access')
+    
+    def record_view(self):
+        self.view_count += 1
+        self.last_viewed = datetime.utcnow()
+    
+    def record_download(self):
+        self.download_count += 1
+        self.last_downloaded = datetime.utcnow()
+
+
+# ==================== BILLING MODELS ====================
+
+class TimeEntry(db.Model):
+    """Track billable time for cases"""
+    __tablename__ = 'time_entry'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    
+    # Time details
+    date = db.Column(db.Date, nullable=False)
+    start_time = db.Column(db.Time)
+    end_time = db.Column(db.Time)
+    duration_minutes = db.Column(db.Integer, nullable=False)
+    
+    # Billing
+    hourly_rate = db.Column(db.Float, nullable=False)
+    amount = db.Column(db.Float, nullable=False)  # Calculated: (duration_minutes / 60) * hourly_rate
+    billable = db.Column(db.Boolean, default=True)
+    
+    # Description
+    description = db.Column(db.Text, nullable=False)
+    activity_type = db.Column(db.String(50))  # research, court, phone, email, drafting, etc.
+    
+    # Status
+    billed = db.Column(db.Boolean, default=False)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoice.id'))
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    case = db.relationship('Case', backref='time_entries')
+    user = db.relationship('User', backref='time_entries')
+    
+    def calculate_amount(self):
+        """Calculate the amount based on duration and hourly rate"""
+        self.amount = (self.duration_minutes / 60.0) * self.hourly_rate
+        return self.amount
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'date': self.date.isoformat() if self.date else None,
+            'duration_minutes': self.duration_minutes,
+            'hourly_rate': self.hourly_rate,
+            'amount': self.amount,
+            'description': self.description,
+            'activity_type': self.activity_type,
+            'billable': self.billable,
+            'billed': self.billed
+        }
+
+
+class Expense(db.Model):
+    """Track case-related expenses"""
+    __tablename__ = 'expense'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    
+    # Expense details
+    date = db.Column(db.Date, nullable=False)
+    description = db.Column(db.String(200), nullable=False)
+    category = db.Column(db.String(50))  # filing_fees, travel, copies, expert_witness, etc.
+    amount = db.Column(db.Float, nullable=False)
+    
+    # Reimbursement
+    billable_to_client = db.Column(db.Boolean, default=True)
+    reimbursable_to_attorney = db.Column(db.Boolean, default=False)
+    
+    # Status
+    billed = db.Column(db.Boolean, default=False)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoice.id'))
+    reimbursed = db.Column(db.Boolean, default=False)
+    
+    # Documentation
+    receipt_path = db.Column(db.String(500))
+    notes = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    case = db.relationship('Case', backref='expenses')
+    user = db.relationship('User', backref='expenses')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'case_id': self.case_id,
+            'date': self.date.isoformat() if self.date else None,
+            'description': self.description,
+            'category': self.category,
+            'amount': self.amount,
+            'billable_to_client': self.billable_to_client
+        }
+
+
+class Invoice(db.Model):
+    """Client invoices"""
+    __tablename__ = 'invoice'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_number = db.Column(db.String(50), unique=True, nullable=False)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'), nullable=False)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False)
+    
+    # Invoice details
+    issue_date = db.Column(db.Date, nullable=False)
+    due_date = db.Column(db.Date, nullable=False)
+    
+    # Amounts
+    subtotal_time = db.Column(db.Float, default=0.0)
+    subtotal_expenses = db.Column(db.Float, default=0.0)
+    subtotal = db.Column(db.Float, default=0.0)
+    tax_rate = db.Column(db.Float, default=0.0)
+    tax_amount = db.Column(db.Float, default=0.0)
+    total_amount = db.Column(db.Float, nullable=False)
+    
+    # Payment tracking
+    amount_paid = db.Column(db.Float, default=0.0)
+    balance_due = db.Column(db.Float)
+    
+    # Status
+    status = db.Column(db.String(50), default='draft')  # draft, sent, paid, partially_paid, overdue, cancelled
+    
+    # Notes
+    notes = db.Column(db.Text)
+    terms = db.Column(db.Text)
+    
+    # PDF generation
+    pdf_generated = db.Column(db.Boolean, default=False)
+    pdf_path = db.Column(db.String(500))
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    sent_at = db.Column(db.DateTime)
+    
+    # Relationships
+    case = db.relationship('Case', backref='invoices')
+    client = db.relationship('Client', backref='invoices')
+    time_entries = db.relationship('TimeEntry', backref='invoice')
+    expenses = db.relationship('Expense', backref='invoice')
+    payments = db.relationship('Payment', back_populates='invoice')
+    
+    def calculate_totals(self):
+        """Calculate invoice totals from time entries and expenses"""
+        self.subtotal_time = sum(te.amount for te in self.time_entries if te.billable)
+        self.subtotal_expenses = sum(e.amount for e in self.expenses if e.billable_to_client)
+        self.subtotal = self.subtotal_time + self.subtotal_expenses
+        self.tax_amount = self.subtotal * self.tax_rate
+        self.total_amount = self.subtotal + self.tax_amount
+        self.balance_due = self.total_amount - self.amount_paid
+    
+    def add_payment(self, amount):
+        """Record a payment and update status"""
+        self.amount_paid += amount
+        self.balance_due = self.total_amount - self.amount_paid
+        
+        if self.balance_due <= 0:
+            self.status = 'paid'
+        elif self.amount_paid > 0:
+            self.status = 'partially_paid'
+    
+    def is_overdue(self):
+        """Check if invoice is overdue"""
+        if self.status in ['paid', 'cancelled']:
+            return False
+        if self.due_date < datetime.utcnow().date():
+            return True
+        return False
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'invoice_number': self.invoice_number,
+            'case_id': self.case_id,
+            'issue_date': self.issue_date.isoformat() if self.issue_date else None,
+            'due_date': self.due_date.isoformat() if self.due_date else None,
+            'total_amount': self.total_amount,
+            'amount_paid': self.amount_paid,
+            'balance_due': self.balance_due,
+            'status': self.status,
+            'is_overdue': self.is_overdue()
+        }
+
+
+class Payment(db.Model):
+    """Payment records"""
+    __tablename__ = 'payment'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoice.id'), nullable=False)
+    
+    # Payment details
+    payment_date = db.Column(db.Date, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(50))  # check, credit_card, bank_transfer, cash, online
+    
+    # Transaction info
+    transaction_id = db.Column(db.String(100))
+    reference_number = db.Column(db.String(100))
+    
+    # Card info (last 4 digits only)
+    card_last_four = db.Column(db.String(4))
+    
+    # Status
+    status = db.Column(db.String(50), default='completed')  # pending, completed, failed, refunded
+    
+    notes = db.Column(db.Text)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    # Relationships
+    invoice = db.relationship('Invoice', back_populates='payments')
+    created_by = db.relationship('User', backref='recorded_payments')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'invoice_id': self.invoice_id,
+            'payment_date': self.payment_date.isoformat() if self.payment_date else None,
+            'amount': self.amount,
+            'payment_method': self.payment_method,
+            'status': self.status
+        }
+
+
+class TrustAccount(db.Model):
+    """Client trust account transactions (IOLTA compliance)"""
+    __tablename__ = 'trust_account'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False)
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'))
+    
+    # Transaction details
+    transaction_date = db.Column(db.Date, nullable=False)
+    transaction_type = db.Column(db.String(50), nullable=False)  # deposit, withdrawal, transfer
+    amount = db.Column(db.Float, nullable=False)
+    balance_after = db.Column(db.Float, nullable=False)
+    
+    # Description
+    description = db.Column(db.Text, nullable=False)
+    reference_number = db.Column(db.String(100))
+    
+    # Related invoice (if withdrawal is for payment)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoice.id'))
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    
+    # Relationships
+    client = db.relationship('Client', backref='trust_transactions')
+    case = db.relationship('Case', backref='trust_transactions')
+    created_by = db.relationship('User', backref='trust_transactions')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'transaction_date': self.transaction_date.isoformat() if self.transaction_date else None,
+            'transaction_type': self.transaction_type,
+            'amount': self.amount,
+            'balance_after': self.balance_after,
+            'description': self.description
+        }
+
+
+class BillingRate(db.Model):
+    """Hourly billing rates for different attorneys and case types"""
+    __tablename__ = 'billing_rate'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    
+    # Rate details
+    rate_type = db.Column(db.String(50), default='standard')  # standard, contingency, flat_fee
+    hourly_rate = db.Column(db.Float, nullable=False)
+    
+    # Optional: Different rates for different case types or activities
+    case_type = db.Column(db.String(50))
+    activity_type = db.Column(db.String(50))
+    
+    # Validity
+    effective_date = db.Column(db.Date, nullable=False)
+    end_date = db.Column(db.Date)
+    is_active = db.Column(db.Boolean, default=True)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = db.relationship('User', backref='billing_rates')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'hourly_rate': self.hourly_rate,
+            'rate_type': self.rate_type,
+            'effective_date': self.effective_date.isoformat() if self.effective_date else None
+        }
+
+
+# ==================== CALENDAR & SCHEDULING ====================
+
+class CalendarEvent(db.Model):
+    """Calendar events linked to cases/clients with optional reminders"""
+    __tablename__ = 'calendar_event'
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    start_at = db.Column(db.DateTime, nullable=False)
+    end_at = db.Column(db.DateTime, nullable=True)
+    all_day = db.Column(db.Boolean, default=False)
+    location = db.Column(db.String(255))
+
+    # Links
+    case_id = db.Column(db.Integer, db.ForeignKey('case.id'))
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'))
+    created_by_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+
+    # Reminders
+    reminder_minutes_before = db.Column(db.Integer, default=0)
+
+    status = db.Column(db.String(50), default='scheduled')  # scheduled, completed, cancelled
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    case = db.relationship('Case', backref='calendar_events')
+    client = db.relationship('Client', backref='calendar_events')
+    created_by = db.relationship('User', backref='created_events')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'title': self.title,
+            'description': self.description,
+            'start_at': self.start_at.isoformat() if self.start_at else None,
+            'end_at': self.end_at.isoformat() if self.end_at else None,
+            'all_day': self.all_day,
+            'location': self.location,
+            'case_id': self.case_id,
+            'client_id': self.client_id,
+            'reminder_minutes_before': self.reminder_minutes_before,
+            'status': self.status
+        }
+
+
+# ==================== INTEGRATIONS / OAUTH ====================
+
+class OAuthAccount(db.Model):
+    """Stores external provider connections (Google/Microsoft) for users."""
+    __tablename__ = 'oauth_account'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    provider = db.Column(db.String(50), nullable=False)  # 'google' | 'microsoft'
+
+    # Tokens (mock for now)
+    access_token = db.Column(db.String(512))
+    refresh_token = db.Column(db.String(512))
+    expires_at = db.Column(db.DateTime)
+    scopes = db.Column(db.Text)
+
+    status = db.Column(db.String(20), default='connected')  # connected | revoked | error
+    connected_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('oauth_accounts', lazy=True))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'provider': self.provider,
+            'status': self.status,
+            'connected_at': self.connected_at.isoformat() if self.connected_at else None
         }

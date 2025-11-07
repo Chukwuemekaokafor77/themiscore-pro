@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Invoice {{ invoice.invoice_number }}</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 12px; color: #222; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #ccc; padding-bottom:8px; margin-bottom:16px; }
+    .title { font-size: 20px; font-weight:bold; }
+    .meta td { padding:2px 6px; }
+    table { width:100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border:1px solid #ddd; padding:6px; }
+    th { background:#f6f6f6; text-align:left; }
+    .totals td { border:none; padding:4px 0; }
+    .right { text-align:right; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">Invoice {{ invoice.invoice_number }}</div>
+    <table class="meta">
+      <tr><td><strong>Issue Date</strong></td><td>{{ invoice.issue_date }}</td></tr>
+      <tr><td><strong>Due Date</strong></td><td>{{ invoice.due_date }}</td></tr>
+      <tr><td><strong>Status</strong></td><td>{{ invoice.status }}</td></tr>
+    </table>
+  </div>
+
+  <div>
+    <strong>Bill To:</strong>
+    <div>{{ invoice.client.first_name }} {{ invoice.client.last_name }}</div>
+    {% if invoice.case %}
+      <div><strong>Case:</strong> {{ invoice.case.title }}</div>
+    {% endif %}
+  </div>
+
+  <h3>Time Entries</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th><th>Description</th><th class="right">Minutes</th><th class="right">Rate</th><th class="right">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set time_total = 0 %}
+      {% for te in invoice.time_entries if te.billable %}
+      <tr>
+        <td>{{ te.date }}</td>
+        <td>{{ te.description }}</td>
+        <td class="right">{{ te.duration_minutes }}</td>
+        <td class="right">${{ '%.2f'|format(te.hourly_rate) }}</td>
+        <td class="right">${{ '%.2f'|format(te.amount) }}</td>
+      </tr>
+      {% set time_total = time_total + (te.amount or 0) %}
+      {% else %}
+      <tr><td colspan="5">No billable time entries.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Expenses</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th><th>Description</th><th>Category</th><th class="right">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set expense_total = 0 %}
+      {% for ex in invoice.expenses if ex.billable_to_client %}
+      <tr>
+        <td>{{ ex.date }}</td>
+        <td>{{ ex.description }}</td>
+        <td>{{ ex.category }}</td>
+        <td class="right">${{ '%.2f'|format(ex.amount) }}</td>
+      </tr>
+      {% set expense_total = expense_total + (ex.amount or 0) %}
+      {% else %}
+      <tr><td colspan="4">No billable expenses.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Totals</h3>
+  <table class="totals">
+    <tr><td><strong>Time Subtotal:</strong></td><td class="right">${{ '%.2f'|format(invoice.subtotal_time or time_total) }}</td></tr>
+    <tr><td><strong>Expense Subtotal:</strong></td><td class="right">${{ '%.2f'|format(invoice.subtotal_expenses or expense_total) }}</td></tr>
+    <tr><td><strong>Tax:</strong></td><td class="right">${{ '%.2f'|format(invoice.tax_amount or 0) }}</td></tr>
+    <tr><td><strong>Total:</strong></td><td class="right">${{ '%.2f'|format(invoice.total_amount or (time_total + expense_total)) }}</td></tr>
+    <tr><td><strong>Paid:</strong></td><td class="right">${{ '%.2f'|format(invoice.amount_paid or 0) }}</td></tr>
+    <tr><td><strong>Balance Due:</strong></td><td class="right">${{ '%.2f'|format(invoice.balance_due or ((invoice.total_amount or (time_total + expense_total)) - (invoice.amount_paid or 0))) }}</td></tr>
+  </table>
+
+  {% if invoice.terms %}
+  <p><strong>Terms:</strong> {{ invoice.terms }}</p>
+  {% endif %}
+  {% if invoice.notes %}
+  <p><strong>Notes:</strong> {{ invoice.notes }}</p>
+  {% endif %}
+</body>
+</html>

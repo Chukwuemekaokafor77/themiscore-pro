@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% block title %}Client Details{% endblock %}
+{% block page_title %}Client: {{ client.first_name }} {{ client.last_name }}{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header">Client Info</div>
+      <div class="card-body">
+        <div class="row mb-2">
+          <div class="col-sm-4 text-muted">Email</div>
+          <div class="col-sm-8">{{ client.email or '-' }}</div>
+        </div>
+        <div class="row mb-2">
+          <div class="col-sm-4 text-muted">Phone</div>
+          <div class="col-sm-8">{{ client.phone or '-' }}</div>
+        </div>
+        <div class="row mb-2">
+          <div class="col-sm-4 text-muted">Address</div>
+          <div class="col-sm-8">{{ client.address or '-' }}</div>
+        </div>
+        <div class="row mb-2">
+          <div class="col-sm-4 text-muted">Created</div>
+          <div class="col-sm-8">{{ client.created_at|time_ago }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Cases</div>
+      <div class="card-body">
+        <table class="table table-striped">
+          <thead><tr><th>#</th><th>Title</th><th>Type</th><th>Status</th><th>Priority</th></tr></thead>
+          <tbody>
+            {% for c in cases %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td><a href="{{ url_for('view_case', case_id=c.id) }}">{{ c.title }}</a></td>
+              <td>{{ c.case_type }}</td>
+              <td>{{ c.status }}</td>
+              <td>{{ c.priority }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="text-center text-muted">No cases for this client.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-header">Client Portal</div>
+      <div class="card-body">
+        {% if client.portal_user %}
+          <div class="mb-2"><strong>Email:</strong> {{ client.portal_user.email }}</div>
+          <div class="mb-2"><strong>Verified:</strong> {{ 'Yes' if client.portal_user.email_verified else 'No' }}</div>
+          <div class="mb-2"><strong>Portal Access:</strong> {{ 'Enabled' if client.portal_user.portal_access else 'Disabled' }}</div>
+          <div class="mb-2"><strong>Last Login:</strong> {{ client.portal_user.last_login|format_date if client.portal_user.last_login else '-' }}</div>
+          <div class="text-muted">Login Count: {{ client.portal_user.login_count }}</div>
+        {% else %}
+          <div class="alert alert-warning">No portal user set up for this client.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Recent Invoices</div>
+      <div class="card-body">
+        {% set client_invoices = client.invoices|sort(attribute='created_at', reverse=True) %}
+        <table class="table table-sm">
+          <thead><tr><th>#</th><th>Invoice #</th><th>Total</th><th>Balance</th><th>Status</th></tr></thead>
+          <tbody>
+            {% for inv in client_invoices[:5] %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>{{ inv.invoice_number }}</td>
+              <td>{{ inv.total_amount|format_currency }}</td>
+              <td>{{ inv.balance_due|format_currency }}</td>
+              <td>{{ inv.status }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="text-center text-muted">No invoices.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <a class="btn btn-outline-primary btn-sm" href="{{ url_for('billing_invoices') }}">View all invoices</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

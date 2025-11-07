@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+{% block title %}Settings{% endblock %}
+{% block page_title %}Settings{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col-md-6">
+    <div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>Calendar Providers</span>
+        <a href="{{ url_for('calendar') }}" class="btn btn-sm btn-outline-secondary">View Calendar</a>
+      </div>
+      <div class="card-body">
+        <div class="mb-3 d-flex justify-content-between align-items-center">
+          <div>
+            <h6 class="mb-1"><i class="bi bi-google me-2"></i> Google Calendar</h6>
+            {% if providers.google.connected %}
+              <span class="badge bg-success">Connected</span>
+              {% if providers.google.details %}
+                <div class="text-muted small mt-1">
+                  Connected at: {{ providers.google.details.connected_at }}<br>
+                  Expires at: {{ providers.google.details.expires_at or 'n/a' }}<br>
+                  Scopes: {{ providers.google.details.scopes or 'n/a' }}
+                </div>
+              {% endif %}
+            {% else %}
+              <span class="badge bg-secondary">Not Connected</span>
+            {% endif %}
+          </div>
+          <div class="text-end">
+            <a class="btn btn-sm btn-primary {% if providers.google.connected %}disabled{% endif %}" href="{{ providers.google.redirect_url }}" {% if providers.google.connected %}tabindex="-1" aria-disabled="true"{% endif %}>Connect</a>
+            {% if providers.google.connected %}
+            <form method="POST" action="{{ url_for('auth_disconnect', provider='google') }}" class="d-inline">
+              <button type="submit" class="btn btn-sm btn-outline-danger">Disconnect</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+        <hr>
+        <div class="mb-3 d-flex justify-content-between align-items-center">
+          <div>
+            <h6 class="mb-1"><i class="bi bi-microsoft me-2"></i> Microsoft (Outlook) Calendar</h6>
+            {% if providers.microsoft.connected %}
+              <span class="badge bg-success">Connected</span>
+              {% if providers.microsoft.details %}
+                <div class="text-muted small mt-1">
+                  Connected at: {{ providers.microsoft.details.connected_at }}<br>
+                  Expires at: {{ providers.microsoft.details.expires_at or 'n/a' }}<br>
+                  Scopes: {{ providers.microsoft.details.scopes or 'n/a' }}
+                </div>
+              {% endif %}
+            {% else %}
+              <span class="badge bg-secondary">Not Connected</span>
+            {% endif %}
+          </div>
+          <div class="text-end">
+            <a class="btn btn-sm btn-primary {% if providers.microsoft.connected %}disabled{% endif %}" href="{{ providers.microsoft.redirect_url }}" {% if providers.microsoft.connected %}tabindex="-1" aria-disabled="true"{% endif %}>Connect</a>
+            {% if providers.microsoft.connected %}
+            <form method="POST" action="{{ url_for('auth_disconnect', provider='microsoft') }}" class="d-inline">
+              <button type="submit" class="btn btn-sm btn-outline-danger">Disconnect</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      <div class="card-footer text-muted">
+        OAuth flows are not yet implemented. Buttons are placeholders.
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card mb-4">
+      <div class="card-header">Email & Notifications</div>
+      <div class="card-body">
+        <form method="POST" action="{{ url_for('save_notifications') }}">
+          <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" id="email_enabled" name="email_enabled" {% if not user_pref or user_pref.email_enabled %}checked{% endif %}>
+            <label class="form-check-label" for="email_enabled">Email reminders enabled</label>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Minutes before event to send reminder</label>
+            <input type="number" class="form-control" name="minutes_before" min="0" step="5" value="{{ (user_pref.minutes_before if user_pref else 60) }}">
+            <div class="form-text">This may override per-event settings when applicable.</div>
+          </div>
+          <div class="text-end">
+            <button type="submit" class="btn btn-primary">Save Preferences</button>
+          </div>
+        </form>
+        <hr>
+        <p class="mb-1 small text-muted">Reminder emails use SMTP if configured; otherwise they are logged as mock emails.</p>
+        <p class="mb-0 small text-muted">Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM in environment to enable real emails.</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
