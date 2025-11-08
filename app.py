@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import requests
 from flask import Flask, render_template, request, jsonify, url_for, redirect, flash, session, send_from_directory, send_file, abort, Response, current_app
