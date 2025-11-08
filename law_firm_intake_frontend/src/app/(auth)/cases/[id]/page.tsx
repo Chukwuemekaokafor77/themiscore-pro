@@ -2,6 +2,9 @@ import { api } from "@/lib/api";
 import AddNoteForm from "@/app/(auth)/cases/[id]/AddNoteForm";
 import { redirect } from "next/navigation";
 import AddActionInline from "./AddActionInline";
+import StatusManager from "./StatusManager";
+import ApplyIntent from "./ApplyIntent";
+import AddTimeEntryForm from "./AddTimeEntryForm";
 
 type Props = { params: { id: string } };
 
@@ -51,6 +54,12 @@ export default async function CaseDetailPage({ params }: Props) {
           <div className="whitespace-pre-wrap">{c.description || '—'}</div>
         </div>
       </section>
+
+      <StatusManager caseId={id} initialStatus={c.status as any} />
+
+      <ApplyIntent caseId={id} />
+
+      <AddTimeEntryForm caseId={id} />
 
       {c.transcripts && c.transcripts.length > 0 && (
         <section className="rounded border bg-white p-4 text-sm grid gap-3">

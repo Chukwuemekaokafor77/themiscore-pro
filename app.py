@@ -18,7 +18,7 @@ import ssl
 # Support both package and script imports
 try:
     # Package-relative imports (when FLASK_APP=law_firm_intake.app)
-    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog
+    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog, CaseStatusAudit
     from .utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from .services.analyzer_assemblyai import analyze_with_aai
     from .filters import time_ago, format_date, format_currency, pluralize
@@ -26,7 +26,7 @@ try:
     from .services.letter_templates import LetterTemplateService
 except ImportError:  # pragma: no cover
     # Fallback for running as a script (python app.py)
-    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog
+    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog, CaseStatusAudit
     from utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from services.analyzer_assemblyai import analyze_with_aai
     from filters import time_ago, format_date, format_currency, pluralize
@@ -69,8 +69,9 @@ else:
     app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 
 # Authentication configuration
-AUTH_USERNAME = 'demo'
-AUTH_PASSWORD = 'themiscore123'  # Change this to a strong password
+# Use environment variables so production/staging can override defaults safely
+AUTH_USERNAME = os.getenv('FLASK_BASIC_USER', 'demo')
+AUTH_PASSWORD = os.getenv('FLASK_BASIC_PASS', 'themiscore123')  # Change this in production
 
 # Basic Auth decorator
 def requires_auth(f):
@@ -831,13 +832,16 @@ def api_portal_documents():
     client_id = _get_portal_client_id()
     if not client_id:
         abort(403)
-    accesses = (
+    case_id = request.args.get('case_id', type=int)
+    q = (
         ClientDocumentAccess.query
         .filter_by(client_id=client_id)
         .options(db.joinedload(ClientDocumentAccess.document), db.joinedload(ClientDocumentAccess.client))
         .order_by(ClientDocumentAccess.granted_at.desc())
-        .all()
     )
+    if case_id:
+        q = q.join(Document, ClientDocumentAccess.document_id == Document.id).filter(Document.case_id == case_id)
+    accesses = q.all()
     def acc_to_dict(a: ClientDocumentAccess):
         doc = getattr(a, 'document', None)
         return {
@@ -853,12 +857,300 @@ def api_portal_documents():
         }
     return jsonify([acc_to_dict(a) for a in accesses])
 
+@app.route('/api/portal/cases', methods=['GET'])
+@portal_login_required
+def api_portal_cases():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    cases = Case.query.filter_by(client_id=client_id).order_by(Case.created_at.desc()).all()
+    return jsonify([
+        {
+            'id': c.id,
+            'title': c.title,
+            'status': c.status,
+            'created_at': c.created_at.isoformat() if getattr(c, 'created_at', None) else None,
+        }
+        for c in cases
+    ])
+
+@app.route('/api/portal/cases/<int:case_id>', methods=['GET'])
+@portal_login_required
+def api_portal_case_detail(case_id: int):
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    c = db.session.get(Case, case_id)
+    if not c or c.client_id != client_id:
+        abort(404)
+    # Deadlines for case
+    deadlines = (Deadline.query
+                 .filter_by(case_id=case_id)
+                 .order_by(Deadline.due_date.asc())
+                 .limit(50)
+                 .all())
+    # Documents accessible to this client for this case
+    doc_accesses = (ClientDocumentAccess.query
+                    .join(Document, ClientDocumentAccess.document_id == Document.id)
+                    .filter(ClientDocumentAccess.client_id == client_id, Document.case_id == case_id)
+                    .options(db.joinedload(ClientDocumentAccess.document))
+                    .order_by(ClientDocumentAccess.granted_at.desc())
+                    .limit(50)
+                    .all())
+    # Messages for this case
+    messages = (ClientMessage.query
+                .filter_by(client_id=client_id, case_id=case_id)
+                .order_by(ClientMessage.created_at.desc())
+                .limit(100)
+                .all())
+    return jsonify({
+        'id': c.id,
+        'title': c.title,
+        'status': c.status,
+        'created_at': c.created_at.isoformat() if getattr(c, 'created_at', None) else None,
+        'deadlines': [
+            {
+                'id': d.id,
+                'name': d.name,
+                'due_date': d.due_date.isoformat() if getattr(d, 'due_date', None) else None,
+                'source': getattr(d, 'source', None),
+                'notes': getattr(d, 'notes', None),
+            } for d in deadlines
+        ],
+        'documents': [
+            {
+                'id': a.id,
+                'granted_at': a.granted_at.isoformat() if getattr(a, 'granted_at', None) else None,
+                'document': {
+                    'id': a.document.id if getattr(a, 'document', None) else None,
+                    'name': getattr(a.document, 'name', None) if getattr(a, 'document', None) else None,
+                    'file_type': getattr(a.document, 'file_type', None) if getattr(a, 'document', None) else None,
+                    'created_at': a.document.created_at.isoformat() if (getattr(a, 'document', None) and getattr(a.document, 'created_at', None)) else None,
+                }
+            } for a in doc_accesses
+        ],
+        'messages': [
+            {
+                'id': m.id,
+                'from_client': m.from_client,
+                'subject': m.subject,
+                'message': m.message,
+                'created_at': m.created_at.isoformat() if m.created_at else None,
+            } for m in messages
+        ]
+    })
+
+@app.route('/api/portal/timeline', methods=['GET'])
+@portal_login_required
+def api_portal_timeline():
+    try:
+        client_id = _get_portal_client_id()
+        if not client_id:
+            abort(403)
+        # Optional query: case_id, pagination
+        case_id = request.args.get('case_id', type=int)
+        page = request.args.get('page', default=1, type=int)
+        per_page = request.args.get('per_page', default=25, type=int)
+        per_page = max(1, min(per_page, 200))
+        items = []
+        # Status changes
+        q_status = (CaseStatusAudit.query
+                    .join(Case, CaseStatusAudit.case_id == Case.id)
+                    .filter(Case.client_id == client_id)
+                    .order_by(CaseStatusAudit.created_at.desc()))
+        if case_id:
+            q_status = q_status.filter(CaseStatusAudit.case_id == case_id)
+        for a in q_status.all():
+            items.append({
+                'type': 'status_change',
+                'case_id': a.case_id,
+                'at': a.created_at.isoformat() if a.created_at else None,
+                'data': {
+                    'from': a.from_status,
+                    'to': a.to_status,
+                }
+            })
+        # Messages
+        q_msgs = ClientMessage.query.filter(ClientMessage.client_id == client_id).order_by(ClientMessage.created_at.desc())
+        if case_id:
+            q_msgs = q_msgs.filter(ClientMessage.case_id == case_id)
+        for m in q_msgs.all():
+            items.append({
+                'type': 'message',
+                'case_id': m.case_id,
+                'at': m.created_at.isoformat() if m.created_at else None,
+                'data': {
+                    'from_client': m.from_client,
+                    'subject': m.subject,
+                    'message': m.message,
+                }
+            })
+        # Document access grants
+        q_docs = (ClientDocumentAccess.query
+                  .join(Document, ClientDocumentAccess.document_id == Document.id)
+                  .filter(ClientDocumentAccess.client_id == client_id)
+                  .order_by(ClientDocumentAccess.granted_at.desc()))
+        if case_id:
+            q_docs = q_docs.join(Case, Document.case_id == Case.id).filter(Case.id == case_id)
+        for acc in q_docs.all():
+            items.append({
+                'type': 'document',
+                'case_id': acc.document.case_id if getattr(acc, 'document', None) else None,
+                'at': acc.granted_at.isoformat() if acc.granted_at else None,
+                'data': {
+                    'name': getattr(acc.document, 'name', None) if getattr(acc, 'document', None) else None,
+                }
+            })
+        # Invoices and payments
+        q_invoices = Invoice.query.filter(Invoice.client_id == client_id).order_by(Invoice.created_at.desc())
+        if case_id:
+            q_invoices = q_invoices.filter(Invoice.case_id == case_id)
+        for inv in q_invoices.all():
+            items.append({
+                'type': 'invoice',
+                'case_id': inv.case_id,
+                'at': inv.created_at.isoformat() if getattr(inv, 'created_at', None) else None,
+                'data': {
+                    'invoice_number': getattr(inv, 'invoice_number', None),
+                    'status': getattr(inv, 'status', None),
+                    'total_amount': float(getattr(inv, 'total_amount', 0) or 0),
+                }
+            })
+        q_pay = (Payment.query
+                 .join(Invoice, Payment.invoice_id == Invoice.id)
+                 .filter(Invoice.client_id == client_id)
+                 .order_by(Payment.payment_date.desc()))
+        if case_id:
+            q_pay = q_pay.filter(Invoice.case_id == case_id)
+        for p in q_pay.all():
+            items.append({
+                'type': 'payment',
+                'case_id': getattr(p.invoice, 'case_id', None) if getattr(p, 'invoice', None) else None,
+                'at': p.payment_date.isoformat() if getattr(p, 'payment_date', None) else None,
+                'data': {
+                    'amount': float(getattr(p, 'amount', 0) or 0),
+                    'status': getattr(p, 'status', None),
+                }
+            })
+        # Sort merged items by datetime desc
+        def sort_key(it):
+            return it.get('at') or ''
+        items.sort(key=sort_key, reverse=True)
+        total = len(items)
+        start = max(0, (page - 1) * per_page)
+        end = min(total, start + per_page)
+        slice_items = items[start:end]
+        return jsonify({
+            'items': slice_items,
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'has_more': end < total
+        })
+    except Exception as e:
+        app.logger.error(f"Error in api_portal_timeline: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+@app.route('/api/portal/messages', methods=['GET'])
+@portal_login_required
+def api_portal_messages_list():
+    try:
+        client_id = _get_portal_client_id()
+        if not client_id:
+            abort(403)
+        case_id = request.args.get('case_id', type=int)
+        limit = request.args.get('limit', type=int) or 100
+        q = (ClientMessage.query
+             .filter(ClientMessage.client_id == client_id)
+             .order_by(ClientMessage.created_at.desc()))
+        if case_id:
+            q = q.filter(ClientMessage.case_id == case_id)
+        msgs = q.limit(min(limit, 500)).all()
+
+        def to_dict(m: ClientMessage):
+            return {
+                'id': m.id,
+                'case_id': m.case_id,
+                'from_client': m.from_client,
+                'subject': m.subject,
+                'message': m.message,
+                'read': m.read,
+                'created_at': m.created_at.isoformat() if m.created_at else None,
+            }
+
+        return jsonify([to_dict(m) for m in msgs])
+    except Exception as e:
+        app.logger.error(f"Error in api_portal_messages_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/portal/messages', methods=['POST'])
+@portal_login_required
+def api_portal_messages_create():
+    try:
+        client_id = _get_portal_client_id()
+        if not client_id:
+            abort(403)
+        data = request.get_json() or {}
+        case_id = data.get('case_id')
+        subject = (data.get('subject') or '').strip()
+        message = (data.get('message') or '').strip()
+        if not case_id or not message:
+            return jsonify({'error': 'case_id and message required'}), 400
+
+        c = db.session.get(Case, int(case_id))
+        if not c or c.client_id != client_id:
+            return jsonify({'error': 'forbidden'}), 403
+
+        m = ClientMessage(
+            case_id=c.id,
+            from_client=True,
+            client_id=client_id,
+            subject=subject or None,
+            message=message,
+            read=False,
+        )
+        db.session.add(m)
+        db.session.commit()
+        return jsonify({'ok': True, 'id': m.id})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_portal_messages_create: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
 # ---- Staff JSON APIs ----
 @app.route('/api/session', methods=['GET'])
 def api_session_probe():
     if session.get('user_id'):
         return ('', 204)
     return ('', 401)
+
+@app.route('/api/messages', methods=['POST'])
+@requires_auth
+def api_staff_message_create():
+    try:
+        data = request.get_json() or {}
+        case_id = data.get('case_id')
+        message = (data.get('message') or '').strip()
+        subject = (data.get('subject') or '').strip() or None
+        if not case_id or not message:
+            return jsonify({'error': 'case_id and message required'}), 400
+        c = db.session.get(Case, int(case_id))
+        if not c:
+            abort(404)
+        m = ClientMessage(
+            case_id=c.id,
+            from_client=False,
+            client_id=c.client_id,
+            subject=subject,
+            message=message,
+            read=False,
+        )
+        db.session.add(m)
+        db.session.commit()
+        return jsonify({'ok': True, 'id': m.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_staff_message_create: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
 
 @app.route('/api/intake/analyze', methods=['POST'])
 @requires_auth
@@ -952,6 +1244,213 @@ def api_dashboard():
         app.logger.error(f"Error in api_dashboard: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
+@app.route('/api/time_entries/running', methods=['GET'])
+@requires_auth
+def api_time_entries_running():
+    try:
+        user_id = _current_user_id()
+        if not user_id:
+            return jsonify({'error': 'unauthorized'}), 401
+        case_id = request.args.get('case_id', type=int)
+        q = TimeEntry.query.filter(TimeEntry.user_id == user_id, TimeEntry.end_time == None)
+        if case_id:
+            q = q.filter(TimeEntry.case_id == case_id)
+        te = q.order_by(TimeEntry.created_at.desc()).first()
+        if not te:
+            return jsonify({'running': False})
+        # compute elapsed seconds
+        start_dt = datetime.combine(te.date, te.start_time) if te.start_time else datetime.utcnow()
+        elapsed_s = max(0, int((datetime.utcnow() - start_dt).total_seconds()))
+        return jsonify({'running': True, 'entry': te.to_dict(), 'elapsed_seconds': elapsed_s})
+    except Exception as e:
+        app.logger.error(f"Error in api_time_entries_running: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/time_entries/start', methods=['POST'])
+@requires_auth
+def api_time_entries_start():
+    try:
+        user_id = _current_user_id()
+        if not user_id:
+            return jsonify({'error': 'unauthorized'}), 401
+        data = request.get_json() or {}
+        case_id = data.get('case_id')
+        if not case_id:
+            return jsonify({'error': 'case_id required'}), 400
+        c = db.session.get(Case, int(case_id))
+        if not c:
+            return abort(404)
+        # prevent multiple running timers per user
+        existing = TimeEntry.query.filter(TimeEntry.user_id==user_id, TimeEntry.end_time==None).first()
+        if existing:
+            return jsonify({'error': 'timer already running', 'entry': existing.to_dict()}), 409
+        now = datetime.utcnow()
+        hourly_rate = float(data.get('hourly_rate') or 200)
+        desc = (data.get('description') or 'Timer started').strip()
+        activity_type = data.get('activity_type')
+        te = TimeEntry(
+            case_id=c.id,
+            user_id=user_id,
+            date=now.date(),
+            start_time=now.time(),
+            end_time=None,
+            duration_minutes=0,
+            hourly_rate=hourly_rate,
+            amount=0.0,
+            billable=True,
+            billed=False,
+            description=desc or 'Timer started',
+            activity_type=activity_type
+        )
+        db.session.add(te)
+        db.session.commit()
+        return jsonify({'ok': True, 'entry': te.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_time_entries_start: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/time_entries/stop', methods=['POST'])
+@requires_auth
+def api_time_entries_stop():
+    try:
+        user_id = _current_user_id()
+        if not user_id:
+            return jsonify({'error': 'unauthorized'}), 401
+        data = request.get_json(silent=True) or {}
+        case_id = data.get('case_id')
+        q = TimeEntry.query.filter(TimeEntry.user_id==user_id, TimeEntry.end_time==None)
+        if case_id:
+            q = q.filter(TimeEntry.case_id==int(case_id))
+        te = q.order_by(TimeEntry.created_at.desc()).first()
+        if not te:
+            return jsonify({'error': 'no running timer'}), 404
+        now = datetime.utcnow()
+        te.end_time = now.time()
+        start_dt = datetime.combine(te.date, te.start_time) if te.start_time else now
+        duration_minutes = max(1, int(round((now - start_dt).total_seconds() / 60.0)))
+        te.duration_minutes = duration_minutes
+        te.calculate_amount()
+        db.session.add(te)
+        db.session.commit()
+        return jsonify({'ok': True, 'entry': te.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_time_entries_stop: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/admin/seed_portal_user', methods=['POST'])
+@requires_auth
+def api_admin_seed_portal_user():
+    try:
+        if os.getenv('ENABLE_ADMIN_SEED', 'false').strip().lower() != 'true':
+            return jsonify({'error': 'admin seeding disabled'}), 403
+        data = request.get_json(silent=True) or {}
+        email = (data.get('email') or os.getenv('DEMO_PORTAL_EMAIL') or 'client@example.com').strip().lower()
+        password = data.get('password') or os.getenv('DEMO_PORTAL_PASSWORD') or 'client123'
+        first_name = data.get('first_name') or os.getenv('DEMO_PORTAL_FIRST_NAME') or 'Demo'
+        last_name = data.get('last_name') or os.getenv('DEMO_PORTAL_LAST_NAME') or 'Client'
+        if '@' not in email:
+            return jsonify({'error': 'invalid email'}), 400
+        # Ensure client exists
+        client = Client.query.filter(db.func.lower(Client.email) == email).first()
+        if not client:
+            client = Client(first_name=first_name, last_name=last_name, email=email)
+            db.session.add(client)
+            db.session.flush()
+        # Ensure portal user exists
+        cu = ClientUser.query.filter(db.func.lower(ClientUser.email) == email).first()
+        if not cu:
+            cu = ClientUser(client_id=client.id, email=email)
+            cu.set_password(password)
+            db.session.add(cu)
+        else:
+            cu.set_password(password)
+        db.session.commit()
+        return jsonify({'ok': True, 'client_id': client.id, 'client_user_id': cu.id, 'email': email, 'password': password})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_admin_seed_portal_user: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/admin/seed_intents', methods=['POST'])
+@requires_auth
+def api_admin_seed_intents():
+    try:
+        if os.getenv('ENABLE_ADMIN_SEED', 'false').strip().lower() != 'true':
+            return jsonify({'error': 'admin seeding disabled'}), 403
+        seeds = [
+            {
+                'key': 'personal_injury_premises',
+                'name': 'Personal Injury - Premises Liability',
+                'department': 'Personal Injury',
+                'actions': [
+                    {'title': 'Send preservation letter to store', 'description': 'Preserve CCTV and incident logs', 'default_status': 'pending', 'default_priority': 'high', 'due_in_days': 1},
+                    {'title': 'Request staff list and cleaning logs', 'description': 'Day of incident', 'default_status': 'pending', 'default_priority': 'medium', 'due_in_days': 2},
+                ],
+                'emails': [
+                    {'filename': 'preservation_letter.docx', 'subject': 'Evidence Preservation Request', 'body': 'Please preserve all CCTV and incident records for the date...'},
+                ],
+            },
+            {
+                'key': 'auto_accident',
+                'name': 'Auto Accident',
+                'department': 'Auto',
+                'actions': [
+                    {'title': 'Request police report', 'description': 'Obtain incident report number and documents', 'default_status': 'pending', 'default_priority': 'high', 'due_in_days': 2},
+                    {'title': 'Contact insurance companies', 'description': 'Notify carrier and obtain claim number', 'default_status': 'pending', 'default_priority': 'medium', 'due_in_days': 3},
+                ],
+                'emails': [
+                    {'filename': 'insurance_notice.docx', 'subject': 'Notice of Representation', 'body': 'We represent the insured in the matter of the accident on ...'},
+                ],
+            },
+            {
+                'key': 'employment_dispute',
+                'name': 'Employment Law - Wrongful Termination',
+                'department': 'Employment',
+                'actions': [
+                    {'title': 'Collect employment records', 'description': 'Offer letters, paystubs, reviews', 'default_status': 'pending', 'default_priority': 'medium', 'due_in_days': 5},
+                    {'title': 'Evaluate EEOC filing', 'description': 'Assess deadlines and grounds', 'default_status': 'pending', 'default_priority': 'high', 'due_in_days': 7},
+                ],
+                'emails': [
+                    {'filename': 'document_request.docx', 'subject': 'Request for Employment Records', 'body': 'Please provide employment records and policies...'},
+                ],
+            },
+        ]
+        created = []
+        for s in seeds:
+            existing = Intent.query.filter_by(key=s['key']).first()
+            if existing:
+                continue
+            i = Intent(key=s['key'], name=s['name'], department=s.get('department'), active=True)
+            db.session.add(i)
+            db.session.flush()
+            for a in s.get('actions', []):
+                at = ActionTemplate(
+                    intent_id=i.id,
+                    title=a['title'],
+                    description=a.get('description'),
+                    default_status=a.get('default_status', 'pending'),
+                    default_priority=a.get('default_priority', 'medium'),
+                    due_in_days=a.get('due_in_days'),
+                )
+                db.session.add(at)
+            for e in s.get('emails', []):
+                et = EmailTemplate(
+                    intent_id=i.id,
+                    filename=e['filename'],
+                    subject=e['subject'],
+                    body=e['body'],
+                )
+                db.session.add(et)
+            created.append(i.key)
+        db.session.commit()
+        return jsonify({'ok': True, 'created': created})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_admin_seed_intents: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
 @app.route('/api/cases/<int:case_id>/notes', methods=['POST'])
 @requires_auth
 def api_case_add_note(case_id):
@@ -1001,6 +1500,56 @@ def api_case_detail(case_id):
         return jsonify(result)
     except Exception as e:
         app.logger.error(f"Error in api_case_detail: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/cases/<int:case_id>/status', methods=['PATCH'])
+@requires_auth
+def api_case_update_status(case_id):
+    try:
+        c = db.session.get(Case, case_id)
+        if c is None:
+            abort(404)
+        data = request.get_json() or {}
+        new_status = (data.get('status') or '').strip()
+        allowed = {'open', 'in_progress', 'closed'}
+        if new_status not in allowed:
+            return jsonify({'error': 'invalid status'}), 400
+        old_status = c.status
+        if old_status == new_status:
+            return jsonify({'ok': True, 'status': c.status})
+        # Update and audit
+        c.status = new_status
+        c.updated_at = datetime.utcnow()
+        audit = CaseStatusAudit(
+            case_id=c.id,
+            from_status=old_status,
+            to_status=new_status,
+            changed_by_id=_current_user_id(),
+            created_at=datetime.utcnow(),
+        )
+        db.session.add(audit)
+        db.session.add(c)
+        db.session.commit()
+        return jsonify({'ok': True, 'status': c.status})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_case_update_status: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/cases/<int:case_id>/status_audit', methods=['GET'])
+@requires_auth
+def api_case_status_audit(case_id):
+    try:
+        c = db.session.get(Case, case_id)
+        if c is None:
+            abort(404)
+        rows = (CaseStatusAudit.query
+                .filter_by(case_id=case_id)
+                .order_by(CaseStatusAudit.created_at.desc())
+                .all())
+        return jsonify([r.to_dict() for r in rows])
+    except Exception as e:
+        app.logger.error(f"Error in api_case_status_audit: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
 @app.route('/api/cases', methods=['GET'])
@@ -1347,6 +1896,99 @@ def api_action_detail(action_id):
         app.logger.error(f"Error in api_action_detail: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
+# Time Entries (JSON)
+@app.route('/api/time_entries', methods=['GET'])
+@requires_auth
+def api_time_entries_list():
+    try:
+        case_id = request.args.get('case_id', type=int)
+        q = TimeEntry.query.options(db.joinedload(TimeEntry.case), db.joinedload(TimeEntry.user)).order_by(TimeEntry.date.desc())
+        if case_id:
+            q = q.filter(TimeEntry.case_id == case_id)
+        items = []
+        for t in q.limit(100).all():
+            items.append({
+                'id': t.id,
+                'case': {'id': t.case.id if getattr(t, 'case', None) else None, 'title': getattr(t.case, 'title', None) if getattr(t, 'case', None) else None},
+                'user_id': getattr(t, 'user_id', None),
+                'date': t.date.isoformat() if getattr(t, 'date', None) else None,
+                'duration_minutes': getattr(t, 'duration_minutes', 0) or 0,
+                'hourly_rate': getattr(t, 'hourly_rate', 0.0) or 0.0,
+                'amount': getattr(t, 'amount', 0.0) or 0.0,
+                'description': getattr(t, 'description', None),
+                'created_at': t.created_at.isoformat() if getattr(t, 'created_at', None) else None,
+            })
+        return jsonify(items)
+    except Exception as e:
+        app.logger.error(f"Error in api_time_entries_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/time_entries', methods=['POST'])
+@requires_auth
+def api_time_entry_create():
+    try:
+        data = request.get_json() or {}
+        case_id = data.get('case_id')
+        hours = float(data.get('hours') or 0)
+        hourly_rate = float(data.get('rate') or 0)
+        description = (data.get('description') or '').strip()
+        date_str = data.get('date')
+        if not case_id or hours <= 0 or hourly_rate <= 0 or not description:
+            return jsonify({'error': 'case_id, hours>0, rate>0, description required'}), 400
+        date_val = None
+        if date_str:
+            try:
+                date_val = datetime.fromisoformat(date_str).date()
+            except Exception:
+                pass
+        if not date_val:
+            date_val = datetime.utcnow().date()
+        duration_minutes = int(round(hours * 60))
+        amount = (duration_minutes / 60.0) * hourly_rate
+        t = TimeEntry(
+            case_id=case_id,
+            user_id=_current_user_id(),
+            date=date_val,
+            duration_minutes=duration_minutes,
+            hourly_rate=hourly_rate,
+            amount=amount,
+            description=description,
+        )
+        db.session.add(t)
+        db.session.commit()
+        return jsonify({'ok': True, 'id': t.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_time_entry_create: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Stripe placeholders
+@app.route('/api/payments/stripe/checkout', methods=['POST'])
+@requires_auth
+def api_stripe_checkout():
+    try:
+        # Placeholder until STRIPE_SECRET_KEY configured
+        return jsonify({'error': 'stripe_not_configured'}), 501
+    except Exception as e:
+        app.logger.error(f"Error in api_stripe_checkout: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/payments/stripe/webhook', methods=['POST'])
+def api_stripe_webhook():
+    # Placeholder endpoint; accept 200 for now
+    return ('', 200)
+
+# Billing: generate invoices (stub)
+@app.route('/api/billing/invoices/generate', methods=['POST'])
+@requires_auth
+def api_billing_generate_invoices():
+    try:
+        # Placeholder until auto-invoicing is implemented
+        return jsonify({'error': 'generate_invoices_not_implemented'}), 501
+    except Exception as e:
+        app.logger.error(f"Error in api_billing_generate_invoices: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
 # Documents list (JSON)
 @app.route('/api/documents', methods=['GET'])
 @requires_auth
@@ -1411,6 +2053,80 @@ def api_documents_upload():
     except Exception as e:
         db.session.rollback()
         app.logger.error(f"Error in api_documents_upload: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# Intents and templates (list/apply)
+@app.route('/api/intents', methods=['GET'])
+@requires_auth
+def api_intents_list():
+    try:
+        intents = Intent.query.filter_by(active=True).order_by(Intent.name.asc()).all()
+        return jsonify([
+            {
+                'id': i.id,
+                'key': i.key,
+                'name': i.name,
+                'department': getattr(i, 'department', None),
+            }
+            for i in intents
+        ])
+    except Exception as e:
+        app.logger.error(f"Error in api_intents_list: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+@app.route('/api/cases/<int:case_id>/apply_intent', methods=['POST'])
+@requires_auth
+def api_case_apply_intent(case_id):
+    try:
+        c = db.session.get(Case, case_id)
+        if c is None:
+            abort(404)
+        data = request.get_json() or {}
+        intent_id = data.get('intent_id')
+        if not intent_id:
+            return jsonify({'error': 'intent_id required'}), 400
+        intent = db.session.get(Intent, int(intent_id))
+        if not intent or not intent.active:
+            return jsonify({'error': 'intent not found'}), 404
+        created_actions = []
+        created_emails = []
+        now = datetime.utcnow()
+        # Create actions from templates
+        for t in intent.action_templates:
+            a = Action(
+                title=t.title,
+                description=t.description,
+                status=t.default_status or 'pending',
+                priority=t.default_priority or 'medium',
+                due_date=(now + timedelta(days=t.due_in_days)) if getattr(t, 'due_in_days', None) else None,
+                assigned_to_id=None,
+                created_by_id=_current_user_id(),
+            )
+            db.session.add(a)
+            db.session.flush()
+            link = CaseAction(case_id=c.id, action_id=a.id, assigned_to_id=None, status=a.status)
+            db.session.add(link)
+            created_actions.append(a.id)
+        # Create email drafts from templates
+        for et in intent.email_templates:
+            d = EmailDraft(
+                case_id=c.id,
+                to=None,
+                subject=et.subject,
+                body=et.body,
+                attachments=None,
+                status='draft',
+                created_at=now,
+                updated_at=now,
+            )
+            db.session.add(d)
+            db.session.flush()
+            created_emails.append(d.id)
+        db.session.commit()
+        return jsonify({'ok': True, 'actions': created_actions, 'emails': created_emails})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_case_apply_intent: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
 # Calendar list (JSON)
