@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import { redirect } from "next/navigation";
 import GenerateInvoicesButton from "./GenerateInvoicesButton";
+import CheckoutButton from "./CheckoutButton";
 
 export const dynamic = "force-dynamic";
 
@@ -42,30 +43,7 @@ export default async function BillingPage() {
                   <td className="px-4 py-2">${i.balance_due.toFixed(2)}</td>
                   <td className="px-4 py-2">{i.created_at ? new Date(i.created_at).toLocaleDateString() : '—'}</td>
                   <td className="px-4 py-2 text-right">
-                    <form action="/api/staff/payments/stripe/checkout" method="post" onSubmit={async (e) => {
-                      e.preventDefault();
-                      try {
-                        const res = await fetch('/api/staff/payments/stripe/checkout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ invoice_id: i.id }) });
-                        if (res.status === 501) {
-                          alert('Stripe not configured');
-                          return;
-                        }
-                        if (!res.ok) {
-                          alert(`Checkout failed (${res.status})`);
-                          return;
-                        }
-                        const data = await res.json();
-                        if (data.url) {
-                          window.location.href = data.url;
-                        } else {
-                          alert('No checkout URL returned');
-                        }
-                      } catch (err) {
-                        alert('Request failed');
-                      }
-                    }}>
-                      <button className="border rounded px-3 py-1 bg-black text-white text-xs">Pay</button>
-                    </form>
+                    <CheckoutButton invoiceId={i.id} />
                   </td>
                 </tr>
               ))}

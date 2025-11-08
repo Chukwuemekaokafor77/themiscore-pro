@@ -2,23 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 
 const FLASK_BASE = process.env.FLASK_BASE_URL || "http://localhost:5000";
 
-function remapCookie(cookieHeader?: string): string | undefined {
-  if (!cookieHeader) return undefined;
-  const m = /(?:^|; )flask_portal_session=([^;]+)/.exec(cookieHeader);
-  if (m && m[1]) return `session=${m[1]}`;
-  return cookieHeader;
-}
-
 export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-    const qs = url.search ? url.search : "";
     const cookieHeader = req.headers.get("cookie") || undefined;
-    const forwardCookie = remapCookie(cookieHeader);
-    const res = await fetch(`${FLASK_BASE}/api/portal/messages${qs}`, {
+    const res = await fetch(`${FLASK_BASE}/api/portal/appointments`, {
       method: "GET",
       headers: {
-        ...(forwardCookie ? { cookie: forwardCookie } : {}),
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
       },
       cache: "no-store",
     });
@@ -32,13 +22,12 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const cookieHeader = req.headers.get("cookie") || undefined;
-    const forwardCookie = remapCookie(cookieHeader);
     const body = await req.text();
-    const res = await fetch(`${FLASK_BASE}/api/portal/messages`, {
+    const res = await fetch(`${FLASK_BASE}/api/portal/appointments`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(forwardCookie ? { cookie: forwardCookie } : {}),
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
       },
       cache: "no-store",
       body,
@@ -49,4 +38,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "failed" }, { status: 500 });
   }
 }
-

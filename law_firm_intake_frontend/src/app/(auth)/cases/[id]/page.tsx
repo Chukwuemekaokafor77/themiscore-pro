@@ -5,6 +5,7 @@ import AddActionInline from "./AddActionInline";
 import StatusManager from "./StatusManager";
 import ApplyIntent from "./ApplyIntent";
 import AddTimeEntryForm from "./AddTimeEntryForm";
+import SlipFallAutomations from "./SlipFallAutomations";
 
 type Props = { params: { id: string } };
 
@@ -56,6 +57,8 @@ export default async function CaseDetailPage({ params }: Props) {
       </section>
 
       <StatusManager caseId={id} initialStatus={c.status as any} />
+
+      <SlipFallAutomations caseId={id} enabled={String(c.category || '').toLowerCase().includes('slip') && String(c.category || '').toLowerCase().includes('fall')} />
 
       <ApplyIntent caseId={id} />
 

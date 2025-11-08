@@ -1,5 +1,7 @@
 import { api } from "@/lib/api";
 import { redirect } from "next/navigation";
+import VoiceIntake from "./VoiceIntake";
+import PortalLogoutButton from "./PortalLogoutButton";
 
 export const dynamic = "force-dynamic";
 
@@ -23,13 +25,40 @@ export default async function PortalDashboardPage() {
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-semibold">Client Portal</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Client Portal</h1>
+        <PortalLogoutButton />
+      </div>
 
-      <section className="rounded border bg-white">
+      {/* Compact stats */}
+      <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="rounded-xl border bg-card shadow-sm p-4">
+          <div className="text-sm text-muted-foreground flex items-center gap-2">
+            <span aria-hidden>📄</span> Documents
+          </div>
+          <div className="text-2xl font-semibold mt-1">{documents.length}</div>
+        </div>
+        <div className="rounded-xl border bg-card shadow-sm p-4">
+          <div className="text-sm text-muted-foreground flex items-center gap-2">
+            <span aria-hidden>🧾</span> Invoices
+          </div>
+          <div className="text-2xl font-semibold mt-1">{invoices.length}</div>
+        </div>
+        <div className="rounded-xl border bg-card shadow-sm p-4">
+          <div className="text-sm text-muted-foreground flex items-center gap-2">
+            <span aria-hidden>💳</span> Payments
+          </div>
+          <div className="text-2xl font-semibold mt-1">{payments.length}</div>
+        </div>
+      </section>
+
+      <VoiceIntake />
+
+      <section className="rounded-xl border bg-card shadow-sm">
         <div className="px-4 py-3 border-b font-medium">Recent Documents</div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 text-left">
+            <thead className="text-left text-muted-foreground">
               <tr>
                 <th className="px-4 py-2">Name</th>
                 <th className="px-4 py-2">Type</th>
@@ -51,16 +80,16 @@ export default async function PortalDashboardPage() {
           </table>
         </div>
         <div className="px-4 py-3 border-t">
-          <a href="/portal/documents" className="text-blue-600 hover:underline">View all documents</a>
+          <a href="/portal/documents" className="inline-flex items-center px-3 py-2 bg-primary text-primary-foreground hover:opacity-90 rounded-md text-sm">View all documents</a>
         </div>
       </section>
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="rounded border bg-white">
+        <div className="rounded-xl border bg-card shadow-sm">
           <div className="px-4 py-3 border-b font-medium">Recent Invoices</div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-left"><tr><th className="px-4 py-2">Invoice #</th><th className="px-4 py-2">Amount</th><th className="px-4 py-2">Status</th></tr></thead>
+              <thead className="text-left text-muted-foreground"><tr><th className="px-4 py-2">Invoice #</th><th className="px-4 py-2">Amount</th><th className="px-4 py-2">Status</th></tr></thead>
               <tbody>
                 {invoices.slice(0, 5).map((i) => (
                   <tr key={i.id} className="border-t">
@@ -76,11 +105,11 @@ export default async function PortalDashboardPage() {
             </table>
           </div>
         </div>
-        <div className="rounded border bg-white">
+        <div className="rounded-xl border bg-card shadow-sm">
           <div className="px-4 py-3 border-b font-medium">Recent Payments</div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-left"><tr><th className="px-4 py-2">Amount</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Status</th></tr></thead>
+              <thead className="text-left text-muted-foreground"><tr><th className="px-4 py-2">Amount</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Status</th></tr></thead>
               <tbody>
                 {payments.slice(0, 5).map((p) => (
                   <tr key={p.id} className="border-t">
@@ -100,3 +129,4 @@ export default async function PortalDashboardPage() {
     </div>
   );
 }
+

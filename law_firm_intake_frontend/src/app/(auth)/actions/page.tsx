@@ -3,10 +3,11 @@ import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
-export default async function ActionsPage({ searchParams }: { searchParams?: { [key: string]: string | string[] | undefined } }) {
-  const clientId = (searchParams?.client_id as string) || "";
-  const status = (searchParams?.status as string) || "";
-  const priority = (searchParams?.priority as string) || "";
+export default async function ActionsPage({ searchParams }: { searchParams: Promise<{ [key: string]: string | string[] | undefined }> }) {
+  const sp = await searchParams;
+  const clientId = (sp?.client_id as string) || "";
+  const status = (sp?.status as string) || "";
+  const priority = (sp?.priority as string) || "";
   const [actions, clients] = await Promise.all([
     api.staff.actions(clientId ? { client_id: Number(clientId) } : undefined),
     api.staff.clients(),

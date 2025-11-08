@@ -14,9 +14,9 @@ export default async function PortalPaymentsPage() {
   return (
     <div className="max-w-6xl mx-auto p-6">
       <h1 className="text-2xl font-semibold mb-4">Payments</h1>
-      <div className="overflow-x-auto rounded border bg-white">
+      <div className="overflow-x-auto rounded-xl border bg-card shadow-sm">
         <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left">
+          <thead className="text-left text-muted-foreground">
             <tr>
               <th className="px-4 py-2">Date</th>
               <th className="px-4 py-2">Amount</th>
@@ -30,7 +30,7 @@ export default async function PortalPaymentsPage() {
             {payments.map((p) => (
               <tr key={p.id} className="border-t">
                 <td className="px-4 py-2">{p.payment_date ? new Date(p.payment_date).toLocaleDateString() : "—"}</td>
-                <td className="px-4 py-2">${'{'}p.amount.toFixed(2){'}'}</td>
+                <td className="px-4 py-2">${p.amount.toFixed(2)}</td>
                 <td className="px-4 py-2">{p.payment_method ?? "—"}</td>
                 <td className="px-4 py-2">{p.status ?? "—"}</td>
                 <td className="px-4 py-2">{p.reference_number ?? "—"}</td>

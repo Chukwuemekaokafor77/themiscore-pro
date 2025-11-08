@@ -14,9 +14,9 @@ export default async function PortalInvoicesPage() {
   return (
     <div className="max-w-6xl mx-auto p-6">
       <h1 className="text-2xl font-semibold mb-4">Invoices</h1>
-      <div className="overflow-x-auto rounded border bg-white">
+      <div className="overflow-x-auto rounded-xl border bg-card shadow-sm">
         <table className="min-w-full text-sm">
-          <thead className="bg-gray-50 text-left">
+          <thead className="text-left text-muted-foreground">
             <tr>
               <th className="px-4 py-2">Invoice #</th>
               <th className="px-4 py-2">Case</th>
@@ -32,8 +32,8 @@ export default async function PortalInvoicesPage() {
                 <td className="px-4 py-2">{inv.invoice_number ?? "—"}</td>
                 <td className="px-4 py-2">{inv.case.title ?? "—"}</td>
                 <td className="px-4 py-2">{inv.status ?? "—"}</td>
-                <td className="px-4 py-2">${'{'}inv.total_amount.toFixed(2){'}'}</td>
-                <td className="px-4 py-2">${'{'}inv.balance_due.toFixed(2){'}'}</td>
+                <td className="px-4 py-2">${inv.total_amount.toFixed(2)}</td>
+                <td className="px-4 py-2">${inv.balance_due.toFixed(2)}</td>
                 <td className="px-4 py-2">{inv.created_at ? new Date(inv.created_at).toLocaleDateString() : "—"}</td>
               </tr>
             ))}

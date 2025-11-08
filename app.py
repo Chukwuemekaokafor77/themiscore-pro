@@ -14,11 +14,15 @@ except Exception:  # pragma: no cover
     BackgroundScheduler = None
 import smtplib
 import ssl
+try:
+    import stripe  # type: ignore
+except Exception:  # pragma: no cover
+    stripe = None
 
 # Support both package and script imports
 try:
     # Package-relative imports (when FLASK_APP=law_firm_intake.app)
-    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog, CaseStatusAudit
+    from .models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, ClientMessage, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog, CaseStatusAudit
     from .utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from .services.analyzer_assemblyai import analyze_with_aai
     from .filters import time_ago, format_date, format_currency, pluralize
@@ -26,7 +30,7 @@ try:
     from .services.letter_templates import LetterTemplateService
 except ImportError:  # pragma: no cover
     # Fallback for running as a script (python app.py)
-    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog, CaseStatusAudit
+    from models import db, User, Client, Case, Action, Document, CaseNote, CaseAction, AIInsight, Transcript, Deadline, EmailDraft, EmailQueue, ClientUser, ClientDocumentAccess, ClientMessage, TimeEntry, Expense, Invoice, Payment, TrustAccount, CalendarEvent, NotificationPreference, Intent, IntentRule, ActionTemplate, EmailTemplate, AnalyzerLog, CaseStatusAudit
     from utils import get_pagination, apply_case_filters, get_sort_params, analyze_case, analyze_intake_text_scenarios
     from services.analyzer_assemblyai import analyze_with_aai
     from filters import time_ago, format_date, format_currency, pluralize
@@ -117,6 +121,11 @@ ALLOWED_AUDIO_EXTENSIONS = {'webm', 'wav', 'mp3', 'm4a', 'mp4', 'ogg'}
 # Initialize extensions
 db.init_app(app)
 migrate = Migrate(app, db)
+
+# Stripe configuration
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY')
+if stripe and STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
 # ---------------- Email sending (SMTP with mock fallback) ---------------- #
 SMTP_HOST = os.getenv('SMTP_HOST')
@@ -245,28 +254,31 @@ app.jinja_env.filters['pluralize'] = pluralize
 
 # Import models for Flask-Migrate to detect (already imported above)
 
-# Redirect legacy HTML pages to Next.js
+NEXT_BASE_URL = os.getenv('NEXT_BASE_URL')  # e.g. https://your-next.app
+# Redirect legacy HTML pages to Next.js (only when NEXT_BASE_URL is configured)
 @app.before_request
 def _redirect_legacy_to_next():
     try:
+        if not NEXT_BASE_URL:
+            return None
         if request.method != 'GET':
             return None
         path = request.path.rstrip('/') or '/'
-        # Do not redirect auth endpoints
-        if path in ('/login', '/logout', '/portal/login'):
+        # Do not redirect auth endpoints or the site root
+        if path in ('/', '/login', '/logout', '/portal/login'):
             return None
+        base = NEXT_BASE_URL.rstrip('/')
         mapping = {
-            '/': 'http://localhost:3000/dashboard',
-            '/dashboard': 'http://localhost:3000/dashboard',
-            '/cases': 'http://localhost:3000/cases',
-            '/clients': 'http://localhost:3000/clients',
-            '/actions': 'http://localhost:3000/actions',
-            '/documents': 'http://localhost:3000/documents',
-            '/calendar': 'http://localhost:3000/calendar',
-            '/billing': 'http://localhost:3000/billing',
-            '/portal/invoices': 'http://localhost:3000/portal/invoices',
-            '/portal/payments': 'http://localhost:3000/portal/payments',
-            '/portal/documents': 'http://localhost:3000/portal/documents',
+            '/dashboard': f'{base}/dashboard',
+            '/cases': f'{base}/cases',
+            '/clients': f'{base}/clients',
+            '/actions': f'{base}/actions',
+            '/documents': f'{base}/documents',
+            '/calendar': f'{base}/calendar',
+            '/billing': f'{base}/billing',
+            '/portal/invoices': f'{base}/portal/invoices',
+            '/portal/payments': f'{base}/portal/payments',
+            '/portal/documents': f'{base}/portal/documents',
         }
         target = mapping.get(path)
         if target:
@@ -1082,6 +1094,189 @@ def api_portal_messages_list():
         app.logger.error(f"Error in api_portal_messages_list: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
+
+@app.route('/api/portal/intake/save', methods=['POST'])
+@portal_login_required
+def api_portal_intake_save():
+    try:
+        client_id = _get_portal_client_id()
+        if not client_id:
+            abort(403)
+        data = request.get_json(silent=True) or {}
+        transcript_text = (data.get('transcript') or '').strip()
+        analysis = data.get('analysis') or {}
+        title = (data.get('title') or 'Client Voice Intake').strip()
+        # Create a new case for this client
+        creator_id = _current_user_id()
+        case = Case(
+            title=title or 'Client Voice Intake',
+            description='Created from client portal intake',
+            status='open',
+            priority=str(analysis.get('urgency') or 'medium'),
+            category=analysis.get('category'),
+            client_id=client_id,
+            created_by_id=creator_id or None,
+        )
+        db.session.add(case)
+        db.session.flush()
+        # Save transcript if provided
+        try:
+            if transcript_text:
+                t = Transcript(case_id=case.id, text=transcript_text)
+                db.session.add(t)
+        except Exception:
+            pass
+        # Save a concise insight record
+        try:
+            summary = {
+                'category': analysis.get('category'),
+                'urgency': analysis.get('urgency'),
+                'key_facts': analysis.get('key_facts'),
+                'dates': analysis.get('dates'),
+                'parties': analysis.get('parties'),
+            }
+            ai = AIInsight(case_id=case.id, insight_text=str(summary), category='intake', confidence=None)
+            db.session.add(ai)
+        except Exception:
+            pass
+        # Optional: materialize deadlines from analysis.dates (best-effort)
+        try:
+            dates = analysis.get('dates') or []
+            for d in dates:
+                name = str(d.get('label') or 'Key date')
+                value = d.get('value')
+                dt = None
+                try:
+                    # Accept YYYY-MM-DD or ISO
+                    dt = datetime.fromisoformat(value)
+                except Exception:
+                    dt = None
+                if dt:
+                    dl = Deadline(case_id=case.id, name=name, due_date=dt, source='intake_analysis')
+                    db.session.add(dl)
+        except Exception:
+            pass
+        db.session.commit()
+        return jsonify({'ok': True, 'case_id': case.id})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_portal_intake_save: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+
+def _slip_fall_build_preview(case: Case, analysis: dict | None = None):
+    # Basic defaults; can be extended with templates later
+    today = datetime.utcnow().date()
+    tasks = [
+        {'title': 'Send evidence preservation letter', 'priority': 'high'},
+        {'title': 'Request incident report and staff info', 'priority': 'high'},
+        {'title': 'Obtain security footage', 'priority': 'high'},
+        {'title': 'Collect medical records', 'priority': 'high'},
+    ]
+    emails = [
+        {
+            'subject': f"Notice to Preserve Evidence - Case #{case.id}",
+            'body': f"Please preserve all evidence related to the incident for client {case.client.first_name if case.client else ''} {case.client.last_name if case.client else ''}.",
+        }
+    ]
+    deadlines = [
+        {'name': 'Follow-up with premises owner', 'due_in_days': 7},
+        {'name': 'Request medical records', 'due_in_days': 14},
+    ]
+    events = [
+        {'title': 'Site inspection scheduling', 'due_in_days': 3},
+    ]
+    return {
+        'case_id': case.id,
+        'tasks': tasks,
+        'emails': emails,
+        'deadlines': deadlines,
+        'events': events,
+    }
+
+
+@app.route('/api/automations/slip_fall/preview', methods=['POST'])
+@requires_auth
+def api_automations_slip_fall_preview():
+    try:
+        data = request.get_json(silent=True) or {}
+        case_id = data.get('case_id')
+        if not case_id:
+            return jsonify({'error': 'case_id required'}), 400
+        case = db.session.get(Case, int(case_id))
+        if not case:
+            return abort(404)
+        preview = _slip_fall_build_preview(case, data.get('analysis'))
+        return jsonify(preview)
+    except Exception as e:
+        app.logger.error(f"Error in api_automations_slip_fall_preview: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+
+@app.route('/api/automations/slip_fall/apply', methods=['POST'])
+@requires_auth
+def api_automations_slip_fall_apply():
+    try:
+        data = request.get_json(silent=True) or {}
+        case_id = data.get('case_id')
+        if not case_id:
+            return jsonify({'error': 'case_id required'}), 400
+        case = db.session.get(Case, int(case_id))
+        if not case:
+            return abort(404)
+        # Use client-provided preview if present; otherwise compute
+        preview = data.get('preview') or _slip_fall_build_preview(case, data.get('analysis'))
+        created = {'tasks': 0, 'emails': 0, 'deadlines': 0}
+        now = datetime.utcnow()
+        # Create tasks (Actions) and associate to case via CaseAction
+        for t in preview.get('tasks', []):
+            try:
+                a = Action(
+                    title=t.get('title') or 'Task',
+                    description=t.get('description'),
+                    action_type='task',
+                    status='pending',
+                    priority=t.get('priority') or 'medium',
+                    created_by_id=_current_user_id()
+                )
+                db.session.add(a)
+                db.session.flush()
+                ca = CaseAction(case_id=case.id, action_id=a.id, status='pending')
+                db.session.add(ca)
+                created['tasks'] += 1
+            except Exception:
+                db.session.rollback()
+        # Create email drafts
+        for em in preview.get('emails', []):
+            try:
+                draft = EmailDraft(
+                    case_id=case.id,
+                    to=None,
+                    subject=em.get('subject') or 'Notice',
+                    body=em.get('body') or '',
+                    status='draft'
+                )
+                db.session.add(draft)
+                created['emails'] += 1
+            except Exception:
+                db.session.rollback()
+        # Create deadlines
+        for dl in preview.get('deadlines', []):
+            try:
+                due_in = int(dl.get('due_in_days') or 7)
+                due_date = now + timedelta(days=due_in)
+                d = Deadline(case_id=case.id, name=dl.get('name') or 'Deadline', due_date=due_date, source='slip_fall_automation')
+                db.session.add(d)
+                created['deadlines'] += 1
+            except Exception:
+                db.session.rollback()
+        db.session.commit()
+        return jsonify({'ok': True, 'created': created})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_automations_slip_fall_apply: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
 @app.route('/api/portal/messages', methods=['POST'])
 @portal_login_required
 def api_portal_messages_create():
@@ -1146,6 +1341,13 @@ def api_staff_message_create():
         )
         db.session.add(m)
         db.session.commit()
+        try:
+            # Notify client via email (best-effort)
+            to_email = c.client.email if getattr(c, 'client', None) and c.client and c.client.email else None
+            if to_email:
+                _send_email(to_email, subject or f"New message on case #{c.id}", message)
+        except Exception:
+            pass
         return jsonify({'ok': True, 'id': m.id}), 201
     except Exception as e:
         db.session.rollback()
@@ -1530,10 +1732,253 @@ def api_case_update_status(case_id):
         db.session.add(audit)
         db.session.add(c)
         db.session.commit()
+        try:
+            # Notify client of status change (best-effort)
+            to_email = c.client.email if getattr(c, 'client', None) and c.client and c.client.email else None
+            if to_email:
+                _send_email(to_email, f"Your case status changed to {new_status}", f"Case '{c.title}' status changed from {old_status} to {new_status}.")
+        except Exception:
+            pass
         return jsonify({'ok': True, 'status': c.status})
     except Exception as e:
         db.session.rollback()
         app.logger.error(f"Error in api_case_update_status: {str(e)}")
+        return jsonify({'error': 'failed'}), 500
+
+# ---------------- Client Portal Checklist APIs ---------------- #
+@app.route('/api/portal/cases/<int:case_id>/checklist', methods=['GET'])
+@portal_login_required
+def api_portal_case_checklist(case_id: int):
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    c = db.session.get(Case, case_id)
+    if not c or c.client_id != client_id:
+        abort(404)
+    # Find actions linked to this case that are pending and appear client-required
+    kw = ['upload', 'provide', 'send', 'sign', 'verify', 'complete', 'fill']
+    links = (CaseAction.query
+             .filter_by(case_id=case_id)
+             .join(Action, CaseAction.action_id == Action.id)
+             .order_by(Action.due_date.asc().nulls_last(), Action.created_at.asc())
+             .all())
+    items = []
+    for link in links:
+        a = link.action
+        if not a:
+            continue
+        if (a.status or 'pending') != 'pending':
+            continue
+        title_l = (a.title or '').lower()
+        is_client = (getattr(a, 'action_type', None) in ('client', 'client_task', 'document', 'signature')) or any(k in title_l for k in kw)
+        if not is_client:
+            continue
+        items.append({
+            'action_id': a.id,
+            'title': a.title,
+            'description': getattr(a, 'description', None),
+            'due_date': a.due_date.isoformat() if getattr(a, 'due_date', None) else None,
+            'status': a.status,
+        })
+    # Include doc-needed hints from deadlines
+    deadlines = (Deadline.query.filter_by(case_id=case_id).order_by(Deadline.due_date.asc()).all())
+    doc_hints = []
+    for d in deadlines:
+        name_l = (d.name or '').lower()
+        if any(k in name_l for k in ['medical', 'records', 'police', 'report', 'personnel', 'file', 'evidence']):
+            doc_hints.append({'deadline_id': d.id, 'name': d.name, 'due_date': d.due_date.isoformat() if getattr(d, 'due_date', None) else None})
+    return jsonify({'items': items, 'doc_hints': doc_hints})
+
+@app.route('/api/portal/cases/<int:case_id>/checklist/<int:action_id>/complete', methods=['POST'])
+@portal_login_required
+def api_portal_case_checklist_complete(case_id: int, action_id: int):
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    c = db.session.get(Case, case_id)
+    if not c or c.client_id != client_id:
+        abort(404)
+    link = CaseAction.query.filter_by(case_id=case_id, action_id=action_id).join(Action, CaseAction.action_id == Action.id).first()
+    if not link or not link.action:
+        abort(404)
+    a = link.action
+    # Only allow completing items that are client-appropriate (same heuristic as GET)
+    title_l = (a.title or '').lower()
+    if not ((getattr(a, 'action_type', None) in ('client', 'client_task', 'document', 'signature')) or any(k in title_l for k in ['upload','provide','send','sign','verify','complete','fill'])):
+        return jsonify({'error': 'forbidden'}), 403
+    now = datetime.utcnow()
+    a.status = 'completed'
+    a.completed_at = now
+    link.status = 'completed'
+    db.session.add(a)
+    db.session.add(link)
+    db.session.commit()
+    return jsonify({'ok': True})
+
+# ---------------- Client Portal Transcription & Intake ---------------- #
+@app.route('/api/portal/transcribe', methods=['POST'])
+@portal_login_required
+def api_portal_transcribe_start():
+    if 'audio_file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    file = request.files['audio_file']
+    if not file or file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    if not _is_allowed_audio(file.filename, getattr(file, 'mimetype', '')):
+        return jsonify({'error': 'Unsupported audio type'}), 415
+    filename = secure_filename(file.filename or f"recording_{datetime.utcnow().timestamp()}.webm")
+    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(temp_path)
+    try:
+        service = STTService()
+        transcript_id = service.start_transcription(temp_path)
+        # Persist Transcript row (link to client)
+        t = Transcript(
+            provider='assemblyai',
+            external_id=transcript_id,
+            status='processing',
+            client_id=_get_portal_client_id()
+        )
+        db.session.add(t)
+        db.session.commit()
+        return jsonify({'status': 'processing', 'transcript_id': transcript_id})
+    except Exception as e:
+        app.logger.error(f"api_portal_transcribe_start error: {str(e)}")
+        return jsonify({'error': 'Failed to start transcription'}), 500
+    finally:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+@app.route('/api/portal/transcripts/<string:external_id>', methods=['GET'])
+@portal_login_required
+def api_portal_transcript_status(external_id: str):
+    t = Transcript.query.filter_by(external_id=external_id).first()
+    if not t:
+        t = Transcript(provider='assemblyai', external_id=external_id, status='processing', client_id=_get_portal_client_id())
+        db.session.add(t)
+        db.session.commit()
+    if t.status != 'completed':
+        try:
+            service = STTService()
+            data = service.get_transcription_status(external_id)
+            new_status = data.get('status') or t.status
+            t.status = new_status
+            if new_status == 'completed' and data.get('text'):
+                t.text = data.get('text')
+            if new_status == 'error':
+                t.text = None
+            db.session.commit()
+        except Exception as e:
+            app.logger.error(f"portal get transcription status error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
+    payload = {
+        'transcript_id': external_id,
+        'status': t.status,
+        'text': getattr(t, 'text', None),
+        'error': getattr(t, 'error', None),
+    }
+    return jsonify(payload)
+
+@app.route('/api/portal/intake/auto', methods=['POST'])
+@portal_login_required
+def api_portal_auto_intake():
+    data = request.get_json() or {}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return jsonify({'error': 'No text provided'}), 400
+    client_id = _get_portal_client_id()
+    c = db.session.get(Client, client_id) if client_id else None
+    if not c:
+        abort(403)
+    try:
+        analysis = _analyze_text(text)
+        new_case = Case(
+            title=(data.get('title') or 'Client Intake'),
+            description=text,
+            case_type=analysis.get('category'),
+            status='open',
+            priority=(analysis.get('priority') or 'Medium').lower(),
+            client_id=c.id,
+            created_by_id=_current_user_id(),
+        )
+        db.session.add(new_case)
+        db.session.flush()
+        insight = AIInsight(
+            case_id=new_case.id,
+            insight_text=f"{analysis.get('category')} | Urgency: {analysis.get('urgency')} | Dept: {analysis.get('department')}",
+            category='scenario_analysis',
+            confidence=None,
+        )
+        db.session.add(insight)
+        for text_action in (analysis.get('suggested_actions') or [])[:10]:
+            action = Action(
+                title=text_action,
+                description='Auto-generated from scenario analysis',
+                action_type='automation',
+                status='pending',
+                priority=(analysis.get('priority') or 'Medium').lower(),
+                due_date=datetime.utcnow() + timedelta(days=1),
+                created_by_id=_current_user_id()
+            )
+            db.session.add(action)
+            db.session.flush()
+            db.session.add(CaseAction(case_id=new_case.id, action_id=action.id, status='pending'))
+        db.session.commit()
+        return jsonify({'status': 'success', 'case_id': new_case.id, 'analysis': analysis}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_portal_auto_intake: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
+
+# ---------------- Client Portal Appointments ---------------- #
+@app.route('/api/portal/appointments', methods=['GET'])
+@portal_login_required
+def api_portal_appointments_list():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    events = (CalendarEvent.query
+              .filter_by(client_id=client_id)
+              .order_by(CalendarEvent.start_at.asc())
+              .all())
+    return jsonify([ev.to_dict() for ev in events])
+
+@app.route('/api/portal/appointments', methods=['POST'])
+@portal_login_required
+def api_portal_appointments_create():
+    client_id = _get_portal_client_id()
+    if not client_id:
+        abort(403)
+    data = request.get_json() or {}
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'error': 'title required'}), 400
+    start_iso = data.get('start_at')
+    end_iso = data.get('end_at')
+    start_at = datetime.fromisoformat(start_iso) if start_iso else None
+    end_at = datetime.fromisoformat(end_iso) if end_iso else None
+    ev = CalendarEvent(
+        title=title,
+        description=data.get('description'),
+        start_at=start_at,
+        end_at=end_at,
+        all_day=bool(data.get('all_day')),
+        location=data.get('location'),
+        case_id=int(data.get('case_id')) if data.get('case_id') else None,
+        client_id=client_id,
+        created_by_id=_current_user_id(),
+        reminder_minutes_before=int(data.get('reminder_minutes_before') or 0),
+        status='scheduled'
+    )
+    try:
+        db.session.add(ev)
+        db.session.commit()
+        return jsonify({'id': ev.id}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_portal_appointments_create: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
 @app.route('/api/cases/<int:case_id>/status_audit', methods=['GET'])
@@ -1962,13 +2407,45 @@ def api_time_entry_create():
         app.logger.error(f"Error in api_time_entry_create: {str(e)}")
         return jsonify({'error': 'failed'}), 500
 
-# Stripe placeholders
+# Stripe checkout
 @app.route('/api/payments/stripe/checkout', methods=['POST'])
 @requires_auth
 def api_stripe_checkout():
     try:
-        # Placeholder until STRIPE_SECRET_KEY configured
-        return jsonify({'error': 'stripe_not_configured'}), 501
+        if not (stripe and STRIPE_SECRET_KEY):
+            return jsonify({'error': 'stripe_not_configured'}), 501
+        data = request.get_json(silent=True) or {}
+        invoice_id = data.get('invoice_id')
+        if not invoice_id:
+            return jsonify({'error': 'invoice_id required'}), 400
+        inv = db.session.get(Invoice, int(invoice_id))
+        if not inv:
+            return jsonify({'error': 'invoice not found'}), 404
+        amount_due = float(getattr(inv, 'balance_due', 0) or getattr(inv, 'total_amount', 0) or 0)
+        if amount_due <= 0:
+            return jsonify({'error': 'nothing_to_pay'}), 400
+        cents = int(round(amount_due * 100))
+        # Build line item
+        name = f"Invoice #{getattr(inv, 'invoice_number', None) or inv.id}"
+        currency = os.getenv('STRIPE_CURRENCY', 'usd')
+        success_url = os.getenv('STRIPE_SUCCESS_URL', 'http://localhost:3000/billing?paid=1')
+        cancel_url = os.getenv('STRIPE_CANCEL_URL', 'http://localhost:3000/billing?canceled=1')
+        session = stripe.checkout.Session.create(
+            mode='payment',
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': currency,
+                    'product_data': { 'name': name },
+                    'unit_amount': cents,
+                },
+                'quantity': 1,
+            }],
+            metadata={ 'invoice_id': str(inv.id) },
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+        return jsonify({'url': session.get('url')}), 200
     except Exception as e:
         app.logger.error(f"Error in api_stripe_checkout: {str(e)}")
         return jsonify({'error': 'failed'}), 500

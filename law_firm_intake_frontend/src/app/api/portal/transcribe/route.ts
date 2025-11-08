@@ -9,17 +9,18 @@ function remapCookie(cookieHeader?: string): string | undefined {
   return cookieHeader;
 }
 
-export async function GET(req: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-    const qs = url.search ? url.search : "";
     const cookieHeader = req.headers.get("cookie") || undefined;
-    const forwardCookie = remapCookie(cookieHeader);
-    const res = await fetch(`${FLASK_BASE}/api/portal/timeline${qs}`, {
-      method: "GET",
+    const contentType = req.headers.get("content-type") || undefined;
+    const body = await req.arrayBuffer();
+    const res = await fetch(`${FLASK_BASE}/api/portal/transcribe`, {
+      method: "POST",
       headers: {
-        ...(forwardCookie ? { cookie: forwardCookie } : {}),
+        ...(contentType ? { "content-type": contentType } : {}),
+        ...(remapCookie(cookieHeader) ? { cookie: remapCookie(cookieHeader)! } : {}),
       },
+      body: Buffer.from(body),
       cache: "no-store",
     });
     const text = await res.text();
