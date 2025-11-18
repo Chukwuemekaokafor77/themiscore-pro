@@ -19,6 +19,8 @@ export default function TranscribePage() {
   const [isRecording, setIsRecording] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [analysis, setAnalysis] = useState<any | null>(null)
+  const [createdCaseId, setCreatedCaseId] = useState<number | null>(null)
+  const [createdSummary, setCreatedSummary] = useState<any | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const timerRef = useRef<number | null>(null)
@@ -199,12 +201,14 @@ export default function TranscribePage() {
                                   client: { first_name: firstName, last_name: lastName, email, phone, address },
                                 }),
                               })
-                              if (!res.ok) throw new Error('Create failed')
-                              const data = await res.json()
-                              if (data && data.case_id) {
-                                router.push(`/cases/${data.case_id}`)
-                              }
-                            } catch {}
+                              const data = await res.json().catch(() => ({} as any))
+                              if (!res.ok) throw new Error(data.error || 'Create failed')
+                              const caseId = data.case_id ?? data.caseId ?? null
+                              setCreatedCaseId(typeof caseId === 'number' ? caseId : Number(caseId) || null)
+                              setCreatedSummary(data || null)
+                            } catch {
+                              // minimal error handling
+                            }
                             setCreating(false)
                           }}
                           disabled={creating}
@@ -212,6 +216,87 @@ export default function TranscribePage() {
                           {creating ? 'Creating…' : 'Create Case + Automation'}
                         </button>
                       </div>
+                    </div>
+                  )}
+                  {createdSummary && (
+                    <div className="border rounded p-3 bg-white space-y-2 mt-3 text-sm">
+                      <div className="font-medium">Automation Summary</div>
+                      {createdCaseId && (
+                        <div className="text-xs">
+                          <span className="text-gray-500 mr-1">Case ID:</span>
+                          <span className="font-mono">{createdCaseId}</span>
+                        </div>
+                      )}
+                      {createdSummary.analysis && (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                          <div>
+                            <div className="text-gray-500 uppercase">Category</div>
+                            <div>{createdSummary.analysis.category ?? '—'}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-500 uppercase">Department</div>
+                            <div>{createdSummary.analysis.department ?? '—'}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-500 uppercase">Priority / Urgency</div>
+                            <div>{createdSummary.analysis.priority || createdSummary.analysis.urgency || '—'}</div>
+                          </div>
+                        </div>
+                      )}
+                      {Array.isArray(createdSummary.actions_created) && createdSummary.actions_created.length > 0 && (
+                        <div>
+                          <div className="font-medium text-xs mb-1">Actions Created ({createdSummary.actions_created.length})</div>
+                          <ul className="list-disc ml-5 space-y-1 text-xs">
+                            {createdSummary.actions_created.slice(0, 5).map((a: any, idx: number) => (
+                              <li key={idx}>
+                                {a.title || a.name || 'Action'}
+                                {a.due_date && <span className="text-gray-500 ml-1">(due {String(a.due_date).slice(0, 10)})</span>}
+                              </li>
+                            ))}
+                            {createdSummary.actions_created.length > 5 && (
+                              <li className="text-xs text-gray-500">…and {createdSummary.actions_created.length - 5} more</li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                      {Array.isArray(createdSummary.documents_created) && createdSummary.documents_created.length > 0 && (
+                        <div>
+                          <div className="font-medium text-xs mb-1">Documents / Letters Generated ({createdSummary.documents_created.length})</div>
+                          <ul className="list-disc ml-5 space-y-1 text-xs">
+                            {createdSummary.documents_created.slice(0, 5).map((d: any, idx: number) => (
+                              <li key={idx}>{d.name || d.filename || d.title || 'Document'}</li>
+                            ))}
+                            {createdSummary.documents_created.length > 5 && (
+                              <li className="text-xs text-gray-500">…and {createdSummary.documents_created.length - 5} more</li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                      {Array.isArray(createdSummary.deadlines_created) && createdSummary.deadlines_created.length > 0 && (
+                        <div>
+                          <div className="font-medium text-xs mb-1">Deadlines Created ({createdSummary.deadlines_created.length})</div>
+                          <ul className="list-disc ml-5 space-y-1 text-xs">
+                            {createdSummary.deadlines_created.slice(0, 5).map((d: any, idx: number) => (
+                              <li key={idx}>
+                                {d.name || 'Deadline'} – {d.due_date ? String(d.due_date).slice(0, 10) : 'date tbd'}
+                              </li>
+                            ))}
+                            {createdSummary.deadlines_created.length > 5 && (
+                              <li className="text-xs text-gray-500">…and {createdSummary.deadlines_created.length - 5} more</li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                      {createdCaseId && (
+                        <div className="pt-2 flex justify-end">
+                          <button
+                            onClick={() => router.push(`/cases/${createdCaseId}`)}
+                            className="px-3 py-1.5 rounded bg-black text-white text-xs"
+                          >
+                            Open Case
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                   <div className="flex gap-3">

@@ -31,6 +31,10 @@ export default function IntakePage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<Analysis | null>(null);
 
+  // Automation summary after auto-intake
+  const [createdCaseId, setCreatedCaseId] = useState<number | null>(null);
+  const [createdSummary, setCreatedSummary] = useState<any | null>(null);
+
   const onAnalyze = async () => {
     setLoading(true);
     setError(null);
@@ -79,15 +83,13 @@ export default function IntakePage() {
           },
         }),
       });
+      const j = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
         throw new Error(j.error || `Create failed (${res.status})`);
       }
-      const j = await res.json();
-      const caseId = j.case_id;
-      if (caseId) {
-        window.location.href = `/cases/${caseId}`;
-      }
+      const caseId = j.case_id ?? j.caseId ?? null;
+      setCreatedCaseId(typeof caseId === "number" ? caseId : Number(caseId) || null);
+      setCreatedSummary(j || null);
     } catch (e: any) {
       setError(e?.message || "Create failed");
     } finally {
@@ -244,6 +246,97 @@ export default function IntakePage() {
               {creating ? "Creating case…" : "Create Case from Analysis"}
             </button>
           </div>
+        </section>
+      )}
+
+      {/* Automation summary after case creation */}
+      {createdSummary && (
+        <section className="rounded border bg-white p-4 space-y-3 text-sm">
+          <h2 className="font-medium text-sm">Automation Summary</h2>
+          {createdCaseId && (
+            <div>
+              <span className="text-gray-500 text-xs mr-1">Case ID:</span>
+              <span className="font-mono text-xs">{createdCaseId}</span>
+            </div>
+          )}
+          {createdSummary.analysis && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <div className="text-gray-500 text-xs">Category</div>
+                <div>{createdSummary.analysis.category ?? "—"}</div>
+              </div>
+              <div>
+                <div className="text-gray-500 text-xs">Department</div>
+                <div>{createdSummary.analysis.department ?? "—"}</div>
+              </div>
+              <div>
+                <div className="text-gray-500 text-xs">Priority / Urgency</div>
+                <div>{createdSummary.analysis.priority || createdSummary.analysis.urgency || "—"}</div>
+              </div>
+            </div>
+          )}
+
+          {Array.isArray(createdSummary.actions_created) && createdSummary.actions_created.length > 0 && (
+            <div>
+              <div className="font-medium mb-1">Actions Created ({createdSummary.actions_created.length})</div>
+              <ul className="list-disc ml-5 space-y-1">
+                {createdSummary.actions_created.slice(0, 5).map((a: any, idx: number) => (
+                  <li key={idx} className="text-xs">
+                    {a.title || a.name || "Action"}
+                    {a.due_date && (
+                      <span className="text-gray-500 ml-1">(due {String(a.due_date).slice(0, 10)})</span>
+                    )}
+                  </li>
+                ))}
+                {createdSummary.actions_created.length > 5 && (
+                  <li className="text-xs text-gray-500">…and {createdSummary.actions_created.length - 5} more</li>
+                )}
+              </ul>
+            </div>
+          )}
+
+          {Array.isArray(createdSummary.documents_created) && createdSummary.documents_created.length > 0 && (
+            <div>
+              <div className="font-medium mb-1">Documents / Letters Generated ({createdSummary.documents_created.length})</div>
+              <ul className="list-disc ml-5 space-y-1 text-xs">
+                {createdSummary.documents_created.slice(0, 5).map((d: any, idx: number) => (
+                  <li key={idx}>{d.name || d.filename || d.title || "Document"}</li>
+                ))}
+                {createdSummary.documents_created.length > 5 && (
+                  <li className="text-xs text-gray-500">…and {createdSummary.documents_created.length - 5} more</li>
+                )}
+              </ul>
+            </div>
+          )}
+
+          {Array.isArray(createdSummary.deadlines_created) && createdSummary.deadlines_created.length > 0 && (
+            <div>
+              <div className="font-medium mb-1">Deadlines Created ({createdSummary.deadlines_created.length})</div>
+              <ul className="list-disc ml-5 space-y-1 text-xs">
+                {createdSummary.deadlines_created.slice(0, 5).map((d: any, idx: number) => (
+                  <li key={idx}>
+                    {d.name || "Deadline"} – {d.due_date ? String(d.due_date).slice(0, 10) : "date tbd"}
+                  </li>
+                ))}
+                {createdSummary.deadlines_created.length > 5 && (
+                  <li className="text-xs text-gray-500">…and {createdSummary.deadlines_created.length - 5} more</li>
+                )}
+              </ul>
+            </div>
+          )}
+
+          {createdCaseId && (
+            <div className="pt-2 border-t mt-2 flex justify-end">
+              <button
+                onClick={() => {
+                  window.location.href = `/cases/${createdCaseId}`;
+                }}
+                className="px-4 py-2 bg-black text-white rounded text-sm"
+              >
+                Open Case
+              </button>
+            </div>
+          )}
         </section>
       )}
     </div>

@@ -1,6 +1,8 @@
 import random
 from datetime import datetime, timedelta
 
+from sqlalchemy import inspect, text
+
 from app import app, db
 from models import Client, Case, User, ClientUser, Invoice, TimeEntry, Expense, Deadline, CalendarEvent, CaseType
 
@@ -112,6 +114,22 @@ def random_address():
 def seed():
     with app.app_context():
         db.create_all()
+
+        # Ensure case_type_id column exists on the case table in production
+        try:
+            engine = db.engine
+            inspector = inspect(engine)
+            columns = [col["name"] for col in inspector.get_columns("case")]
+            if "case_type_id" not in columns and engine.dialect.name == "postgresql":
+                # Add nullable column and foreign key to case_type.id (safe when run once)
+                engine.execute(
+                    text(
+                        'ALTER TABLE "case" ADD COLUMN case_type_id INTEGER REFERENCES case_type(id)'
+                    )
+                )
+        except Exception:
+            # If inspection or DDL fails, continue; seeding will still work on old schemas
+            pass
 
         # Ensure a default admin user exists for created_by_id
         admin = User.query.filter_by(email='admin@example.com').first()
