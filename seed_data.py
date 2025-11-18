@@ -120,13 +120,14 @@ def seed():
             engine = db.engine
             inspector = inspect(engine)
             columns = [col["name"] for col in inspector.get_columns("case")]
-            if "case_type_id" not in columns and engine.dialect.name == "postgresql":
+            if "case_type_id" not in columns and engine.dialect.name in ("postgresql", "postgres"):
                 # Add nullable column and foreign key to case_type.id (safe when run once)
-                engine.execute(
+                db.session.execute(
                     text(
                         'ALTER TABLE "case" ADD COLUMN case_type_id INTEGER REFERENCES case_type(id)'
                     )
                 )
+                db.session.commit()
         except Exception:
             # If inspection or DDL fails, continue; seeding will still work on old schemas
             pass
