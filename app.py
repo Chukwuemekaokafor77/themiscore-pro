@@ -105,6 +105,41 @@ def _current_user_id():
     except Exception:
         return None
 
+
+def apply_ai_classification_to_case(case, ai_data: dict) -> None:
+    """Apply AI classification JSON to a Case, including CaseType linkage.
+
+    Expected ai_data["classification"] subset:
+        {
+            "case_type_key": "civil_tort_premises_liability",
+            "primary_category": "civil",
+            "subcategory": "...",
+            "matter_type": "...",
+            "urgency": "high",
+            "confidence": 0.9,
+            "issue_tags": [...]
+        }
+    """
+    classification = ai_data.get("classification") or {}
+
+    # High-level category on Case
+    primary_category = classification.get("primary_category")
+    if primary_category:
+        case.category = primary_category
+
+    # Structured case type taxonomy linkage
+    case_type_key = classification.get("case_type_key")
+    if case_type_key:
+        try:
+            ct = CaseType.query.filter_by(key=case_type_key, active=True).first()
+        except Exception:
+            ct = None
+        if ct:
+            case.case_type_id = ct.id
+            # Optional: keep legacy string field in sync for now
+            if not case.case_type:
+                case.case_type = ct.label
+
 # Load configuration from environment variables
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-key-change-in-production')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -283,7 +318,7 @@ def _redirect_legacy_to_next():
         }
         target = mapping.get(path)
         if target:
-            return redirect(target, code=301)
+            return redirect(target, code=302)
     except Exception:
         return None
     return None
@@ -432,12 +467,19 @@ def index():
 @requires_auth
 def login():
     # Decommissioned Flask login UI: delegate to Next.js staff console login
-    return redirect('http://localhost:3000/login', code=301)
+    base = os.getenv('NEXT_BASE_URL')
+    if base:
+        return redirect(base.rstrip('/') + '/login', code=302)
+    # Fallback for local dev
+    return redirect('http://localhost:3000/login', code=302)
 
 @app.route('/logout')
 def logout():
     session.pop('user_id', None)
     # Redirect to Next.js staff console login
+    base = os.getenv('NEXT_BASE_URL')
+    if base:
+        return redirect(base.rstrip('/') + '/login', code=302)
     return redirect('http://localhost:3000/login', code=302)
 
 @app.route('/dashboard')
@@ -1120,6 +1162,19 @@ def api_portal_intake_save():
         )
         db.session.add(case)
         db.session.flush()
+
+        # Apply taxonomy-aware classification mapping (if present)
+        try:
+            classification = {
+                "primary_category": analysis.get("category"),
+                "case_type_key": analysis.get("case_type_key"),
+                "urgency": analysis.get("urgency"),
+                "confidence": analysis.get("confidence"),
+            }
+            apply_ai_classification_to_case(case, {"classification": classification})
+        except Exception:
+            # Do not break intake flow if AI mapping fails
+            pass
         # Save transcript if provided
         try:
             if transcript_text:
@@ -1379,6 +1434,7 @@ def api_intake_analyze():
         # Normalize response structure
         payload = {
             'category': result.get('category'),
+            'case_type_key': result.get('case_type_key'),
             'urgency': result.get('urgency'),
             'key_facts': result.get('key_facts', {}),
             'dates': result.get('dates', {}),
@@ -1882,6 +1938,103 @@ def api_portal_transcript_status(external_id: str):
     }
     return jsonify(payload)
 
+@app.route('/api/intake/auto', methods=['POST'])
+@requires_auth
+def api_staff_auto_intake():
+    """Staff-side auto intake that creates a Case from free-text and client info.
+
+    Expects JSON body:
+        {
+            "text": "...",
+            "title": "...",  # optional
+            "client": {"first_name", "last_name", "email", "phone", "address"}
+        }
+    """
+    data = request.get_json() or {}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return jsonify({'error': 'No text provided'}), 400
+
+    client_payload = data.get('client') or {}
+    first_name = (client_payload.get('first_name') or '').strip()
+    last_name = (client_payload.get('last_name') or '').strip()
+    email = (client_payload.get('email') or '').strip().lower() or None
+    phone = (client_payload.get('phone') or None)
+    address = (client_payload.get('address') or None)
+    if not first_name or not last_name:
+        return jsonify({'error': 'client.first_name and client.last_name required'}), 400
+
+    try:
+        # Ensure client exists (match by email when available)
+        c = None
+        if email:
+            c = Client.query.filter(db.func.lower(Client.email) == email).first()
+        if not c:
+            c = Client(first_name=first_name, last_name=last_name, email=email, phone=phone, address=address)
+            db.session.add(c)
+            db.session.flush()
+
+        # Run analyzer (AssemblyAI or scenario-based fallback via _analyze_text)
+        analysis = _analyze_text(text)
+
+        # Create case
+        new_case = Case(
+            title=(data.get('title') or 'Client Intake'),
+            description=text,
+            case_type=analysis.get('category'),
+            status='open',
+            priority=(analysis.get('priority') or analysis.get('urgency') or 'Medium').lower(),
+            category=analysis.get('category'),
+            client_id=c.id,
+            created_by_id=_current_user_id(),
+        )
+        db.session.add(new_case)
+        db.session.flush()
+
+        # Apply taxonomy-aware classification if case_type_key is present
+        try:
+            classification = {
+                "primary_category": analysis.get("category"),
+                "case_type_key": analysis.get("case_type_key"),
+                "urgency": analysis.get("urgency"),
+                "confidence": analysis.get("confidence"),
+            }
+            apply_ai_classification_to_case(new_case, {"classification": classification})
+        except Exception:
+            pass
+
+        # Persist AI insight
+        insight = AIInsight(
+            case_id=new_case.id,
+            insight_text=f"{analysis.get('category')} | Urgency: {analysis.get('urgency')} | Dept: {analysis.get('department')}",
+            category='scenario_analysis',
+            confidence=analysis.get('confidence'),
+        )
+        db.session.add(insight)
+
+        # Create suggested actions & link to case
+        for text_action in (analysis.get('suggested_actions') or [])[:10]:
+            action = Action(
+                title=text_action,
+                description='Auto-generated from scenario analysis',
+                action_type='automation',
+                status='pending',
+                priority=(analysis.get('priority') or 'Medium').lower(),
+                due_date=datetime.utcnow() + timedelta(days=1),
+                created_by_id=_current_user_id(),
+            )
+            db.session.add(action)
+            db.session.flush()
+            db.session.add(CaseAction(case_id=new_case.id, action_id=action.id, status='pending'))
+
+        db.session.commit()
+        return jsonify({'status': 'success', 'case_id': new_case.id, 'analysis': analysis}), 201
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Error in api_staff_auto_intake: {str(e)}")
+        return jsonify({'error': 'Server error'}), 500
+
+
 @app.route('/api/portal/intake/auto', methods=['POST'])
 @portal_login_required
 def api_portal_auto_intake():
@@ -1901,11 +2054,25 @@ def api_portal_auto_intake():
             case_type=analysis.get('category'),
             status='open',
             priority=(analysis.get('priority') or 'Medium').lower(),
+            category=analysis.get('category'),
             client_id=c.id,
             created_by_id=_current_user_id(),
         )
         db.session.add(new_case)
         db.session.flush()
+
+        # Apply taxonomy-aware classification if case_type_key is present
+        try:
+            classification = {
+                "primary_category": analysis.get("category"),
+                "case_type_key": analysis.get("case_type_key"),
+                "urgency": analysis.get("urgency"),
+                "confidence": analysis.get("confidence"),
+            }
+            apply_ai_classification_to_case(new_case, {"classification": classification})
+        except Exception:
+            pass
+
         insight = AIInsight(
             case_id=new_case.id,
             insight_text=f"{analysis.get('category')} | Urgency: {analysis.get('urgency')} | Dept: {analysis.get('department')}",

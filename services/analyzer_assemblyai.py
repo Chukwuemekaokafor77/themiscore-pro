@@ -10,12 +10,21 @@ LEMUR_URL = "https://api.assemblyai.com/lemur/v3/generate"
 PROMPT = (
     "You are a legal intake classifier. Read the given client narrative and extract structured fields. "
     "Return ONLY strict JSON with the following schema keys: "
-    "category (string), urgency (Low|Medium|High), key_facts (object), dates (object), parties (object), "
-    "suggested_actions (array of strings), checklists (object of string[]), department (string|optional), confidence (number 0-1|optional)."
+    "category (string, human-readable label), "
+    "case_type_key (string, one of: 'pi_slip_fall', 'pi_motor_vehicle', 'employment_wrongful_dismissal', "
+    "'employment_discrimination', 'med_mal_general', or null/empty if not applicable), "
+    "urgency (Low|Medium|High), key_facts (object), dates (object), parties (object), "
+    "suggested_actions (array of strings), checklists (object of string[]), department (string|optional), confidence (number 0-1|optional). "
+    "Use case_type_key to select the most specific case type from the list above that best fits the narrative. "
+    "For example: a slip and fall at a store should use 'pi_slip_fall'; a car crash should use 'pi_motor_vehicle'; "
+    "an age-based employment discrimination matter should use 'employment_discrimination'; "
+    "a wrongful termination employment matter should use 'employment_wrongful_dismissal'; "
+    "a surgery/sponge/retained foreign-object case should use 'med_mal_general'. "
 )
 
 SCHEMA_HINT = {
     "category": "",
+    "case_type_key": None,
     "urgency": "Low",
     "key_facts": {},
     "dates": {},

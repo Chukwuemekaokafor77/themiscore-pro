@@ -71,7 +71,7 @@ class CaseStatusAudit(db.Model):
 
 
 class Intent(db.Model):
-    """Configurable intent representing a high-level case category."""
+    """Configurable intent representing a high-level case category (used for automations)."""
     __tablename__ = 'intent'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -93,6 +93,46 @@ class Intent(db.Model):
             'name': self.name,
             'department': self.department,
             'priority_default': self.priority_default,
+            'active': self.active,
+        }
+
+
+class CaseType(db.Model):
+    """Taxonomy of legal case types (jurisdiction-aware, updatable)."""
+    __tablename__ = 'case_type'
+
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(150), unique=True, nullable=False)  # e.g., 'civil_tort_premises_liability'
+    label = db.Column(db.String(255), nullable=False)  # e.g., 'Civil – Torts – Premises Liability'
+
+    # High-level buckets and specialisation
+    category = db.Column(db.String(100), nullable=True)      # e.g., 'criminal', 'civil', 'family', 'administrative'
+    subcategory = db.Column(db.String(150), nullable=True)   # e.g., 'tort_premises', 'employment_human_rights'
+
+    # Jurisdictional hints
+    jurisdiction = db.Column(db.String(10), nullable=True)   # e.g., 'CA' for Canada, 'US', etc.
+    court_level_default = db.Column(db.String(100), nullable=True)  # e.g., 'provincial', 'superior', 'tribunal'
+
+    description = db.Column(db.Text, nullable=True)
+
+    parent_id = db.Column(db.Integer, db.ForeignKey('case_type.id'), nullable=True)
+    parent = db.relationship('CaseType', remote_side=[id], backref=db.backref('children', lazy=True))
+
+    active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'key': self.key,
+            'label': self.label,
+            'category': self.category,
+            'subcategory': self.subcategory,
+            'jurisdiction': self.jurisdiction,
+            'court_level_default': self.court_level_default,
+            'description': self.description,
+            'parent_id': self.parent_id,
             'active': self.active,
         }
 
@@ -300,11 +340,16 @@ class Case(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text)
+
+    # Legacy string field for case type (kept for backwards compatibility)
     case_type = db.Column(db.String(100))
-    
-    # AI Classification field
+
+    # New structured taxonomy linkage
+    case_type_id = db.Column(db.Integer, db.ForeignKey('case_type.id'), nullable=True)
+
+    # AI Classification field (high-level category)
     category = db.Column(db.String(50), nullable=True)  # e.g., "family", "housing", etc.
-    
+
     status = db.Column(db.String(50), default='open')
     priority = db.Column(db.String(20), default='medium')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -326,6 +371,7 @@ class Case(db.Model):
                             primaryjoin='Case.id == CaseAction.case_id',
                             secondaryjoin='Action.id == CaseAction.action_id',
                             back_populates='cases')
+    case_type_ref = db.relationship('CaseType', backref=db.backref('cases', lazy=True))
 
     def to_dict(self):
         return {
@@ -343,7 +389,9 @@ class Case(db.Model):
             'actions': [ca.action.to_dict() for ca in self.case_actions],
             'category': self.category,
             'insights': [insight.to_dict() for insight in self.insights],
-            'referrals': [referral.to_dict() for referral in self.referrals]
+            'referrals': [referral.to_dict() for referral in self.referrals],
+            'case_type_id': self.case_type_id,
+            'case_type_taxonomy': self.case_type_ref.to_dict() if self.case_type_ref else None,
         }
 
 

@@ -1,4 +1,4 @@
-// src/app/api/staff/intake/auto/route.ts
+// src/app/api/staff/intake/analyze/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 
@@ -11,29 +11,21 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const text = (body?.text ?? "").trim();
-    const client = body?.client ?? {};
-
     if (!text) {
-      return NextResponse.json({ error: "text required" }, { status: 400 });
-    }
-    if (!client?.first_name || !client?.last_name) {
-      return NextResponse.json(
-        { error: "client.first_name and client.last_name required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing text" }, { status: 400 });
     }
 
     const store = await cookies();
     const teamAuth = store.get("team_auth")?.value;
     const auth = teamAuth ? `Basic ${teamAuth}` : ENV_BASIC;
 
-    const res = await fetch(`${staffBase}/api/intake/auto`, {
+    const res = await fetch(`${staffBase}/api/intake/analyze`, {
       method: "POST",
       headers: {
         Authorization: auth,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ text }),
     });
 
     if (res.status === 401 || res.status === 403) {
@@ -45,6 +37,8 @@ export async function POST(req: NextRequest) {
     }
 
     const data = await res.json();
+
+    // data already includes category, case_type_key, etc.
     return NextResponse.json(data);
   } catch (e: any) {
     return NextResponse.json({ error: "Server error", detail: String(e?.message ?? e) }, { status: 500 });

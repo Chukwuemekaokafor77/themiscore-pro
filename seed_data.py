@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta
 
 from app import app, db
-from models import Client, Case, User, ClientUser, Invoice, TimeEntry, Expense, Deadline, CalendarEvent
+from models import Client, Case, User, ClientUser, Invoice, TimeEntry, Expense, Deadline, CalendarEvent, CaseType
 
 FIRST_NAMES = [
     "James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda",
@@ -46,6 +46,55 @@ CASE_TYPES = [
     "Civil / Real Estate",
 ]
 
+# Structured taxonomy for CaseType model (used by AI classification and automations)
+CASE_TYPE_TAXONOMY = [
+    {
+        "key": "pi_slip_fall",
+        "label": "Slip and Fall",
+        "category": "Personal Injury",
+        "subcategory": "Slip & Fall",
+        "jurisdiction": "ON",
+        "court_level_default": "Superior Court of Justice",
+        "description": "Personal injury claim arising from a slip, trip, or fall incident.",
+    },
+    {
+        "key": "pi_motor_vehicle",
+        "label": "Motor Vehicle Accident",
+        "category": "Personal Injury",
+        "subcategory": "Car Accident",
+        "jurisdiction": "ON",
+        "court_level_default": "Superior Court of Justice",
+        "description": "Personal injury claim arising from a motor vehicle collision.",
+    },
+    {
+        "key": "employment_wrongful_dismissal",
+        "label": "Wrongful Dismissal",
+        "category": "Employment",
+        "subcategory": "Termination",
+        "jurisdiction": "ON",
+        "court_level_default": "Superior Court of Justice",
+        "description": "Employment dispute relating to alleged wrongful dismissal or constructive dismissal.",
+    },
+    {
+        "key": "employment_discrimination",
+        "label": "Employment Discrimination",
+        "category": "Employment",
+        "subcategory": "Human Rights",
+        "jurisdiction": "ON",
+        "court_level_default": "Human Rights Tribunal of Ontario",
+        "description": "Workplace discrimination, harassment, or reprisal based on a protected ground.",
+    },
+    {
+        "key": "med_mal_general",
+        "label": "Medical Malpractice",
+        "category": "Medical Malpractice",
+        "subcategory": "General",
+        "jurisdiction": "ON",
+        "court_level_default": "Superior Court of Justice",
+        "description": "Negligence claim against healthcare providers for substandard medical care.",
+    },
+]
+
 
 def random_phone():
     return f"({random.randint(200, 989)}) {random.randint(200, 989)}-{random.randint(1000, 9999)}"
@@ -76,6 +125,22 @@ def seed():
             admin.set_password('admin123')
             db.session.add(admin)
             db.session.flush()
+
+        # Seed CaseType taxonomy (idempotent)
+        for data in CASE_TYPE_TAXONOMY:
+            key = data["key"]
+            ct = CaseType.query.filter_by(key=key).first()
+            if not ct:
+                ct = CaseType(key=key)
+                db.session.add(ct)
+            ct.label = data.get("label", ct.label)
+            ct.category = data.get("category", ct.category)
+            ct.subcategory = data.get("subcategory", ct.subcategory)
+            ct.jurisdiction = data.get("jurisdiction", ct.jurisdiction)
+            ct.court_level_default = data.get("court_level_default", ct.court_level_default)
+            ct.description = data.get("description", ct.description)
+            if ct.active is None:
+                ct.active = True
 
         existing = Client.query.count()
         clients = []

@@ -268,7 +268,7 @@ def extract_relative_dates(text):
 
 def analyze_intake_text_scenarios(text):
     """Scenario analyzer for four core intake scenarios.
-    Returns a structured dict with: category, urgency, department, priority, key_facts, dates, suggested_actions, checklists.
+    Returns a structured dict with: category, urgency, department, priority, key_facts, dates, suggested_actions, checklists, case_type_key.
     """
     if not text:
         return {
@@ -287,7 +287,7 @@ def analyze_intake_text_scenarios(text):
     rel_dates = extract_relative_dates(text)
     dates = list(set(ents.get('dates', []) + rel_dates))
 
-    def result(category, department, priority, urgency, key_facts, suggested_actions, checklists):
+    def result(category, department, priority, urgency, key_facts, suggested_actions, checklists, case_type_key=None):
         return {
             'category': category,
             'department': department,
@@ -296,7 +296,8 @@ def analyze_intake_text_scenarios(text):
             'key_facts': key_facts,
             'dates': dates,
             'suggested_actions': suggested_actions,
-            'checklists': checklists
+            'checklists': checklists,
+            'case_type_key': case_type_key,
         }
 
     # Scenario 1: Slip and Fall at Walmart (Premises Liability)
@@ -320,7 +321,7 @@ def analyze_intake_text_scenarios(text):
             'client_questions': ['Shoes worn', 'Photos taken', 'Reported to employee', 'Incident report filed', 'Witnesses info', 'Nature/duration of spill']
         }
         return result(
-            'Personal Injury - Premises Liability', 'Personal Injury', 'High', 'High', key_facts, suggested_actions, checklists
+            'Personal Injury - Premises Liability', 'Personal Injury', 'High', 'High', key_facts, suggested_actions, checklists, case_type_key='pi_slip_fall'
         )
 
     # Scenario 2: Car Accident
@@ -350,7 +351,7 @@ def analyze_intake_text_scenarios(text):
             'medical': ['ER records', 'Ambulance report', 'Neck X-ray/CT', 'Doctor diagnosis', 'Track follow-ups'],
             'scene': ['Skid marks', 'Traffic signals', 'Signs', 'Road/weather', 'Surveillance cams']
         }
-        return result('Car Accident / Auto Collision', 'Auto Accident', 'High', 'High', key_facts, suggested_actions, checklists)
+        return result('Car Accident / Auto Collision', 'Auto Accident', 'High', 'High', key_facts, suggested_actions, checklists, case_type_key='pi_motor_vehicle')
 
     # Scenario 3: Employment Law - Age Discrimination
     if ('discrimination' in t or 'harassment' in t or 'pushed out' in t) and any(k in t for k in ['age', 'older', 'retire']):
@@ -372,7 +373,7 @@ def analyze_intake_text_scenarios(text):
             'evidence_circumstantial': ['Compare to younger employees', 'Duty changes', 'Review pattern shifts', 'Stat data'],
             'files': ['Personnel file', 'All reviews', 'Discipline actions', 'Promotions/raises', 'Job descriptions']
         }
-        return result('Employment Law - Age Discrimination', 'Employment Law', 'Medium-High', 'Medium-High', key_facts, suggested_actions, checklists)
+        return result('Employment Law - Age Discrimination', 'Employment Law', 'Medium-High', 'Medium-High', key_facts, suggested_actions, checklists, case_type_key='employment_discrimination')
 
     # Scenario 4: Medical Malpractice
     if any(k in t for k in ['sponge', 'retained foreign', 'left inside']) and any(k in t for k in ['surgery', 'surgeon']):
@@ -396,7 +397,7 @@ def analyze_intake_text_scenarios(text):
             'records_other_hospital': ['Admission/ER', 'Sponge removal surgery report', 'Imaging proving sponge', 'Pathology'],
             'policies': ['Sponge count procedures', 'OR logs', 'Credentialing for surgeon', 'Incident/peer review (if applicable)']
         }
-        return result('Medical Malpractice', 'Medical Malpractice', 'High', 'High', key_facts, suggested_actions, checklists)
+        return result('Medical Malpractice', 'Medical Malpractice', 'High', 'High', key_facts, suggested_actions, checklists, case_type_key='med_mal_general')
 
     # Fallback
     return {
@@ -407,6 +408,7 @@ def analyze_intake_text_scenarios(text):
         'key_facts': {},
         'dates': dates,
         'suggested_actions': ['Review case details', 'Schedule client meeting'],
-        'checklists': {}
+        'checklists': {},
+        'case_type_key': None,
     }
 
